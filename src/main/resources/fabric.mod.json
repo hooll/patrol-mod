@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "id": "patrol-mod",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "name": "Patrol Mod",
-  "description": "多世界循环巡逻：!patrol add/start/stop，由 Baritone 自动寻路，到位切换、卡住重试。",
+  "description": "多世界循环巡逻 + 自动找怪：!patrol add/start/hunt，由 Baritone 自动寻路，到位切换、卡住重试。",
   "authors": [
     "hooll"
   ],

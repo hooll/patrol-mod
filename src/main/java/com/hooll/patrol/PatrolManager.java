@@ -5,8 +5,11 @@ import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
 
 import java.io.IOException;
 import java.io.Reader;
@@ -29,6 +32,7 @@ public class PatrolManager {
 
     private static PatrolConfig config = new PatrolConfig();
 
+    // ---------- 巡逻状态 ----------
     private static boolean active = false;
     private static List<PatrolPoint> route = new ArrayList<>();
     private static int routeIndex = 0;
@@ -44,6 +48,14 @@ public class PatrolManager {
     private static int scanCounter = 0;
     private static boolean mobsNear = false;
     private static int combatTicks = 0;
+
+    // ---------- 找怪状态 ----------
+    public enum HuntMode { NONE, SINGLE, AUTO }
+
+    private static HuntMode huntMode = HuntMode.NONE;
+    private static Entity huntTarget = null;
+    private static BlockPos huntLastGoto = null;
+    private static boolean huntArrived = false;
 
     private static String lastEvent = null;
     private static int lastEventTicks = 0;
@@ -68,6 +80,8 @@ public class PatrolManager {
                 if (config.combatFreezeSeconds <= 0) config.combatFreezeSeconds = 240;
                 if (config.maxRetries < 0) config.maxRetries = 1;
                 if (config.hudPosition == null) config.hudPosition = "top-center";
+                if (config.huntRange <= 0) config.huntRange = 48.0;
+                if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 2.5;
             }
         } catch (IOException | RuntimeException e) {
             PatrolMod.LOG.error("failed to load patrol config", e);
@@ -111,6 +125,7 @@ public class PatrolManager {
             case "clear" -> cmdClear();
             case "start", "go" -> cmdStart(parts);
             case "stop" -> cmdStop();
+            case "hunt", "find", "target" -> cmdHunt(parts);
             case "reload" -> cmdReload();
             case "status" -> cmdStatus();
             default -> cmdHelp();
@@ -210,6 +225,7 @@ public class PatrolManager {
             newRoute = candidates;
         }
 
+        endHunt(false);
         route = newRoute;
         routeIndex = 0;
         routeDimension = dim;
@@ -227,6 +243,11 @@ public class PatrolManager {
     }
 
     private static void cmdStop() {
+        if (huntMode != HuntMode.NONE) {
+            endHunt(true);
+            msg("已停止找怪");
+            return;
+        }
         if (!active) {
             msg("当前没有在巡逻");
             return;
@@ -235,15 +256,69 @@ public class PatrolManager {
         msg("已停止巡逻");
     }
 
+    private static void cmdHunt(String[] parts) {
+        String arg = parts.length > 2 ? parts[2].toLowerCase(Locale.ROOT) : "";
+
+        if (arg.equals("stop") || arg.equals("off")) {
+            if (huntMode == HuntMode.NONE) {
+                msg("当前没有在找怪");
+                return;
+            }
+            endHunt(true);
+            msg("已停止找怪");
+            return;
+        }
+
+        if (arg.equals("auto")) {
+            if (huntMode == HuntMode.AUTO) {
+                endHunt(true);
+                msg("自动找怪：关");
+                return;
+            }
+            clearPatrolState();
+            if (baritoneLoaded()) sendBaritone("cancel");
+            huntMode = HuntMode.AUTO;
+            huntTarget = null;
+            huntLastGoto = null;
+            huntArrived = false;
+            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，找到就过去，KillAura 负责打）");
+            return;
+        }
+
+        if (mc.player == null || mc.world == null) return;
+        Entity target = findInView(config.huntRange);
+        if (target == null) {
+            msg("视角前方 " + (int) config.huntRange + " 格内没找到活物（准星对着它再执行）");
+            return;
+        }
+        clearPatrolState();
+        if (baritoneLoaded()) sendBaritone("cancel");
+        huntMode = HuntMode.SINGLE;
+        huntTarget = target;
+        huntLastGoto = null;
+        huntArrived = false;
+        msg("锁定 " + target.getName().getString() + "，距离 " + (int) mc.player.distanceTo(target) + "m，走过去");
+    }
+
     private static void cmdReload() {
         load();
         msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
                 + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
-                + config.combatFreezeSeconds + "s");
+                + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange);
     }
 
     private static void cmdStatus() {
         String ver = version();
+        if (huntMode == HuntMode.AUTO) {
+            msg("v" + ver + " 自动找怪中" + (huntTarget != null && huntTarget.isAlive()
+                    ? " → " + huntTarget.getName().getString() + " (" + (int) mc.player.distanceTo(huntTarget) + "m)" : " (扫描中)"));
+            return;
+        }
+        if (huntMode == HuntMode.SINGLE) {
+            msg("v" + ver + " 锁定目标" + (huntTarget != null && huntTarget.isAlive()
+                    ? " " + huntTarget.getName().getString() + " (" + (int) mc.player.distanceTo(huntTarget) + "m)" : " (已消失)"));
+            return;
+        }
         if (!active) {
             msg("v" + ver + " 未在巡逻。当前世界 " + shortDim(currentDimension()) + " 有 " + pointsIn(currentDimension()).size() + " 个点");
             return;
@@ -253,12 +328,6 @@ public class PatrolManager {
                 + (mobsNear ? " §e[附近有怪,计时暂停]" : ""));
     }
 
-    public static String version() {
-        return FabricLoader.getInstance().getModContainer(PatrolMod.MOD_ID)
-                .map(c -> c.getMetadata().getVersion().getFriendlyString())
-                .orElse("?");
-    }
-
     private static void cmdHelp() {
         send("§b[巡逻] §f命令:");
         send("§7  !patrol add <名字>   §f在当前位置记一个点(自动带当前世界)");
@@ -266,13 +335,15 @@ public class PatrolManager {
         send("§7  !patrol list          §f列出所有点(按世界分组)");
         send("§7  !patrol clear         §f清空当前世界的点");
         send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
-        send("§7  !patrol stop          §f停止");
-        send("§7  !patrol status        §f当前状态");
+        send("§7  !patrol hunt          §f记住视角前方那只怪,走过去(准星对着它)");
+        send("§7  !patrol hunt auto     §f开关自动找怪(找最近的敌对怪→过去→下一只)");
+        send("§7  !patrol hunt stop     §f停止找怪");
+        send("§7  !patrol stop          §f停止巡逻/找怪");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
-        send("§7屏幕上面板显示实时进度;聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名");
+        send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
     }
 
-    // ---------- 巡逻逻辑 ----------
+    // ---------- 主循环 ----------
 
     public static void tick(MinecraftClient client) {
         if (lastEventTicks > 0) lastEventTicks--;
@@ -284,8 +355,13 @@ public class PatrolManager {
             long m = currentMtime();
             if (m != lastConfigMtime) {
                 load();
-                if (active) event("配置已重载");
+                if (active || huntMode != HuntMode.NONE) event("配置已重载");
             }
+        }
+
+        if (huntMode != HuntMode.NONE) {
+            tickHunt(client);
+            return;
         }
 
         if (!active) return;
@@ -375,6 +451,62 @@ public class PatrolManager {
         }
     }
 
+    private static void tickHunt(MinecraftClient client) {
+        if (client.player == null || client.world == null) return;
+
+        if (huntMode == HuntMode.AUTO) {
+            if (huntTarget == null || !huntTarget.isAlive()) {
+                huntTarget = findNearestHostile(client, config.huntRange);
+                huntLastGoto = null;
+                huntArrived = false;
+                if (huntTarget == null) return;
+                event("新目标 " + huntTarget.getName().getString());
+            }
+        } else {
+            if (huntTarget == null || !huntTarget.isAlive()) {
+                event(huntTarget == null ? "目标已消失" : "目标已被击杀");
+                endHunt(false);
+                return;
+            }
+        }
+
+        double dist = client.player.distanceTo(huntTarget);
+        if (dist > config.huntRange * 2) {
+            if (huntMode == HuntMode.SINGLE) {
+                event("目标跑太远，放弃");
+                endHunt(true);
+            } else {
+                huntTarget = null;
+            }
+            return;
+        }
+
+        if (dist <= config.arriveRadius) {
+            if (!huntArrived) {
+                huntArrived = true;
+                if (baritoneLoaded()) sendBaritone("cancel");
+                event("已到达 " + huntTarget.getName().getString());
+            }
+            return;
+        }
+
+        huntArrived = false;
+        int tx = (int) Math.floor(huntTarget.getX());
+        int ty = (int) Math.floor(huntTarget.getY());
+        int tz = (int) Math.floor(huntTarget.getZ());
+        boolean needGoto = huntLastGoto == null;
+        if (!needGoto) {
+            double mdx = tx - huntLastGoto.getX();
+            double mdy = ty - huntLastGoto.getY();
+            double mdz = tz - huntLastGoto.getZ();
+            needGoto = mdx * mdx + mdy * mdy + mdz * mdz >= config.huntRetargetDistance * config.huntRetargetDistance;
+        }
+        if (needGoto) {
+            huntLastGoto = new BlockPos(tx, ty, tz);
+            baritone("goto " + tx + " " + ty + " " + tz);
+        }
+    }
+
     private static void gotoCurrent() {
         if (mc.player == null) return;
         PatrolPoint p = route.get(routeIndex);
@@ -395,7 +527,7 @@ public class PatrolManager {
         gotoCurrent();
     }
 
-    private static void stop() {
+    private static void clearPatrolState() {
         active = false;
         route = new ArrayList<>();
         routeIndex = 0;
@@ -405,7 +537,77 @@ public class PatrolManager {
         combatTicks = 0;
         mobsNear = false;
         routeDimension = null;
+    }
+
+    private static void stop() {
+        clearPatrolState();
         if (baritoneLoaded()) sendBaritone("cancel");
+    }
+
+    private static void endHunt(boolean cancelPath) {
+        huntMode = HuntMode.NONE;
+        huntTarget = null;
+        huntLastGoto = null;
+        huntArrived = false;
+        if (cancelPath && baritoneLoaded()) sendBaritone("cancel");
+    }
+
+    // ---------- 找怪 ----------
+
+    /** 视角射线命中的最近活物（先按碰撞箱求交，没命中再放宽成一个锥形容差） */
+    private static Entity findInView(double range) {
+        if (mc.player == null || mc.world == null) return null;
+        Vec3d eye = mc.player.getEyePos();
+        Vec3d dir = mc.player.getRotationVec(1.0F);
+        Vec3d end = eye.add(dir.multiply(range));
+
+        Entity best = null;
+        double bestDist = Double.MAX_VALUE;
+        Entity fallback = null;
+        double fallbackDist = Double.MAX_VALUE;
+
+        for (Entity e : mc.world.getEntities()) {
+            if (!(e instanceof LivingEntity) || e == mc.player || !e.isAlive()) continue;
+
+            var hit = e.getBoundingBox().raycast(eye, end);
+            if (hit.isPresent()) {
+                double d = hit.get().subtract(eye).length();
+                if (d < bestDist) {
+                    bestDist = d;
+                    best = e;
+                }
+                continue;
+            }
+
+            // 容差：射线到实体中心的垂直距离
+            Vec3d center = e.getBoundingBox().getCenter();
+            Vec3d toEntity = center.subtract(eye);
+            double t = toEntity.dotProduct(dir);
+            if (t <= 0 || t > range) continue;
+            Vec3d closest = eye.add(dir.multiply(t));
+            double perp = closest.subtract(center).length();
+            double tolerance = Math.max(0.7, e.getWidth() * 0.7 + 0.3);
+            if (perp <= tolerance && t < fallbackDist) {
+                fallbackDist = t;
+                fallback = e;
+            }
+        }
+        return best != null ? best : fallback;
+    }
+
+    private static Entity findNearestHostile(MinecraftClient client, double range) {
+        if (client.world == null || client.player == null) return null;
+        Entity best = null;
+        double bestDist = range;
+        for (Entity e : client.world.getEntities()) {
+            if (!(e instanceof HostileEntity) || !e.isAlive()) continue;
+            double d = client.player.distanceTo(e);
+            if (d < bestDist) {
+                bestDist = d;
+                best = e;
+            }
+        }
+        return best;
     }
 
     // ---------- HUD 数据 ----------
@@ -420,6 +622,14 @@ public class PatrolManager {
         public double partial;
         public HudStatus status = HudStatus.WALKING;
         public String event;
+
+        public boolean hunting;
+        public boolean huntAuto;
+        public boolean huntHasTarget;
+        public boolean huntArrived;
+        public String huntName = "";
+        public int huntDistance;
+        public int huntHealth = -1;
     }
 
     public enum HudStatus {
@@ -445,6 +655,23 @@ public class PatrolManager {
     public static HudState hudState() {
         if (!config.hud) return null;
         if (mc.player == null || mc.world == null) return null;
+
+        if (huntMode != HuntMode.NONE) {
+            HudState s = new HudState();
+            s.hunting = true;
+            s.huntAuto = huntMode == HuntMode.AUTO;
+            s.huntArrived = huntArrived;
+            if (huntTarget != null && huntTarget.isAlive()) {
+                s.huntHasTarget = true;
+                s.huntName = huntTarget.getName().getString();
+                s.huntDistance = (int) Math.round(mc.player.distanceTo(huntTarget));
+                if (huntTarget instanceof LivingEntity living) {
+                    s.huntHealth = (int) Math.ceil(living.getHealth());
+                }
+            }
+            if (lastEventTicks > 0) s.event = lastEvent;
+            return s;
+        }
 
         if (!active) {
             if (!config.hudWhenIdle) return null;
@@ -501,8 +728,9 @@ public class PatrolManager {
 
     private static void baritone(String command) {
         if (!baritoneLoaded()) {
-            msg("§c未检测到 Baritone(baritone-meteor)，无法寻路，巡逻已停止");
+            msg("§c未检测到 Baritone(baritone-meteor)，无法寻路");
             stop();
+            endHunt(false);
             return;
         }
         sendBaritone(command);
@@ -526,6 +754,12 @@ public class PatrolManager {
         if (dim == null) return "?";
         int i = dim.indexOf(':');
         return i >= 0 ? dim.substring(i + 1) : dim;
+    }
+
+    public static String version() {
+        return FabricLoader.getInstance().getModContainer(PatrolMod.MOD_ID)
+                .map(c -> c.getMetadata().getVersion().getFriendlyString())
+                .orElse("?");
     }
 
     private static void send(String s) {

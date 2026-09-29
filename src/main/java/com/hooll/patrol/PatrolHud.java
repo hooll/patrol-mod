@@ -30,10 +30,32 @@ public class PatrolHud implements HudElement {
 
         MutableText line1;
         MutableText line2;
+        boolean showBar;
+
         if (st.idle) {
             line1 = Text.literal("巡逻待机").formatted(Formatting.WHITE)
                     .append(Text.literal(" · " + st.extra + " 个点").formatted(Formatting.GRAY));
             line2 = Text.literal("!patrol start 开始").formatted(Formatting.DARK_GRAY);
+            showBar = false;
+        } else if (st.hunting) {
+            line1 = Text.literal("找怪").formatted(Formatting.WHITE)
+                    .append(Text.literal(st.huntAuto ? " (自动)" : "").formatted(Formatting.GRAY));
+            if (st.huntHasTarget) {
+                line1.append(Text.literal("  →  ").formatted(Formatting.DARK_GRAY))
+                        .append(Text.literal(st.huntName).formatted(Formatting.YELLOW));
+                line2 = Text.literal("距离 " + st.huntDistance + "m").formatted(Formatting.GRAY)
+                        .append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
+                        .append(st.huntArrived
+                                ? Text.literal("已到达 · 交给 KillAura").formatted(Formatting.GREEN)
+                                : Text.literal("追踪中").formatted(Formatting.AQUA));
+                if (st.huntHealth >= 0) {
+                    line2.append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
+                            .append(Text.literal("♥ " + st.huntHealth).formatted(Formatting.RED));
+                }
+            } else {
+                line2 = Text.literal("附近没有敌对怪，扫描中…").formatted(Formatting.DARK_GRAY);
+            }
+            showBar = false;
         } else {
             line1 = Text.literal("巡逻 ").formatted(Formatting.WHITE)
                     .append(Text.literal((st.index + 1) + "/" + st.total).formatted(Formatting.AQUA))
@@ -42,11 +64,12 @@ public class PatrolHud implements HudElement {
             line2 = Text.literal("距离 " + (int) Math.ceil(st.distance) + "m").formatted(Formatting.GRAY)
                     .append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
                     .append(statusText(st.status));
+            showBar = true;
         }
 
         int textW = Math.max(tr.getWidth(line1), tr.getWidth(line2));
         int panelW = textW + 12;
-        int barH = 5;
+        int barH = showBar ? 5 : 0;
         int panelH = 6 + 10 + 3 + 10 + 4 + barH + 4;
 
         int screenW = ctx.getScaledWindowWidth();
@@ -69,12 +92,11 @@ public class PatrolHud implements HudElement {
         ctx.drawText(tr, line1, x + 6, y + 5, white, true);
         ctx.drawText(tr, line2, x + 6, y + 16, white, true);
 
-        // 进度条：已完成点 + 当前这一段(按距离估算)
-        int barX = x + 6;
-        int barY = bottom - barH - 4;
-        int barW = panelW - 12;
-        ctx.fill(barX, barY, barX + barW, barY + barH, 0x40FFFFFF);
-        if (!st.idle) {
+        if (showBar) {
+            int barX = x + 6;
+            int barY = bottom - barH - 4;
+            int barW = panelW - 12;
+            ctx.fill(barX, barY, barX + barW, barY + barH, 0x40FFFFFF);
             double progress = ((double) st.index + st.partial) / Math.max(1, st.total);
             if (progress > 1) progress = 1;
             if (progress < 0) progress = 0;

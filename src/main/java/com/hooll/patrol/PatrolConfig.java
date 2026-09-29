@@ -20,6 +20,10 @@ public class PatrolConfig {
     // 每个点卡住后的重试次数，用完才跳过
     public int maxRetries = 1;
 
+    // 找怪
+    public double huntRange = 48.0;
+    public double huntRetargetDistance = 2.5;
+
     // 屏幕状态面板（只有自己可见）
     public boolean hud = true;
     // "top-center" 或 "top-left"
