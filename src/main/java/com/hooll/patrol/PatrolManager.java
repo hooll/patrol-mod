@@ -69,8 +69,10 @@ public class PatrolManager {
     private static double huntLastX;
     private static double huntLastY;
     private static double huntLastZ;
-    // 最近一次锁定的实体类型，供 "!patrol hunt type"(不带参数) 一键变成"只打这种"
+    // 最近一次锁定的实体类型，供 "!patrol hunt type / ignore"(不带参数) 用
     private static String huntLastType = null;
+    // 本次自动找怪的临时目标类型：开 auto 时按视角/上次锁定决定，不写配置，关掉就清空
+    private static String sessionHuntType = null;
     // 已判定"到不了"的目标，冷却期内不再选（key=实体 id）
     private static final Map<Integer, Long> huntFailed = new HashMap<>();
     private static final long HUNT_FAIL_COOLDOWN_MS = 30_000L;
@@ -368,14 +370,24 @@ public class PatrolManager {
             }
             clearPatrolState();
             if (baritoneLoaded()) sendBaritone("cancel");
+            sessionHuntType = resolveSessionType();
             huntMode = HuntMode.AUTO;
             huntTarget = null;
             huntLastGoto = null;
             huntArrived = false;
             resetHuntTracking(mc);
-            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，" + targetSummary() + "，找到就过去，KillAura 负责打）");
-            if (config.huntTargets.equals("hostile") && config.huntTypes.isEmpty()) {
-                event("提示: 自定义怪若不算目标，改 huntTargets 或用 !patrol scan 看类型");
+            if (sessionHuntType != null) {
+                msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，本次只找 §f" + sessionHuntType
+                        + "§f，来自你视角/刚才锁定的那只；不写配置）");
+                if (matchesAnyType(sessionHuntType, config.huntIgnoreTypes)) {
+                    msg("§e注意: " + sessionHuntType + " 在黑名单里，本次仍会打它；想按名单来就重开 auto 并把视角移开怪");
+                }
+                event("本次只找 " + sessionHuntType);
+            } else {
+                msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，" + targetSummary() + "，找到就过去，KillAura 负责打）");
+                if (config.huntTargets.equals("hostile") && config.huntTypes.isEmpty()) {
+                    event("提示: 自定义怪若不算目标，改 huntTargets 或用 !patrol scan 看类型");
+                }
             }
             return;
         }
@@ -393,13 +405,10 @@ public class PatrolManager {
         huntLastGoto = null;
         huntArrived = false;
         resetHuntTracking(mc);
+        sessionHuntType = null;
         huntLastType = typeId(target);
-        boolean remembered = rememberHuntType(huntLastType);
         msg("锁定 " + target.getName().getString() + " §7[" + huntLastType + "]§f，距离 "
-                + (int) mc.player.distanceTo(target) + "m，走过去");
-        if (remembered) {
-            msg("已记住「以后只打 " + huntLastType + "」，!patrol hunt auto 会一直找它；取消: !patrol hunt type clear");
-        }
+                + (int) mc.player.distanceTo(target) + "m，走过去；接着 !patrol hunt auto 本次就只打这种");
     }
 
     private static void cmdScan() {
@@ -444,16 +453,11 @@ public class PatrolManager {
         }
     }
 
-    /**
-     * 锁定一只怪时顺手把它记成"以后只打这种"。
-     * 只在没手动设过白名单时自动写入，避免覆盖用户自己在配置里写的一串类型。
-     */
-    private static boolean rememberHuntType(String id) {
-        if (matchesAnyType(id, config.huntTypes)) return false;
-        if (!config.huntTypes.isEmpty()) return false;
-        config.huntTypes.add(id);
-        save();
-        return true;
+    /** 开 auto 时定本次打什么：先看视角那只，再看刚锁定的那只，都没有就按配置 */
+    private static String resolveSessionType() {
+        Entity inView = findInView(config.huntRange);
+        if (inView != null) return typeId(inView);
+        return huntLastType;
     }
 
     /** 正在追的目标类型，没有就用上次锁定的 */
@@ -492,12 +496,14 @@ public class PatrolManager {
 
     /** 当前"认哪些实体"的一句话描述，聊天/扫描里用 */
     private static String targetSummary() {
+        if (sessionHuntType != null) return "只找 " + sessionHuntType + "（本次）";
         if (!config.huntTypes.isEmpty()) return "只找 " + String.join(", ", config.huntTypes);
         return config.huntTargets;
     }
 
     /** 白名单 + 黑名单一起的描述 */
     private static String huntFilterLine() {
+        if (sessionHuntType != null) return "目标: 只找 " + sessionHuntType + "（本次 auto，不写配置）";
         return "目标: " + targetSummary()
                 + (config.huntIgnoreTypes.isEmpty() ? "" : " | 排除: " + String.join(", ", config.huntIgnoreTypes));
     }
@@ -542,10 +548,10 @@ public class PatrolManager {
         send("§7  !patrol list          §f列出所有点(按世界分组)");
         send("§7  !patrol clear         §f清空当前世界的点");
         send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
-        send("§7  !patrol hunt          §f准星对着怪执行:记住它、走过去,并记住「以后只打这种」");
-        send("§7  !patrol hunt type [类型|clear]   §f只打某类(白名单)，不带参数=当前/上次锁定那种");
-        send("§7  !patrol hunt ignore [类型|clear] §f排除某类(黑名单)，不带参数=把当前/上次锁定那种拉黑");
-        send("§7  !patrol hunt auto     §f开关自动找怪(最近的怪→过去→下一只)");
+        send("§7  !patrol hunt          §f准星对着怪执行:记住它并走过去(之后 auto 本次只打这种)");
+        send("§7  !patrol hunt auto     §f自动找怪:本次只找你视角(或刚锁定)那种,不写配置;再按一次关");
+        send("§7  !patrol hunt type [类型|clear]   §f白名单(写进配置,持久):只打某类");
+        send("§7  !patrol hunt ignore [类型|clear] §f黑名单(写进配置,持久):排除某类");
         send("§7  !patrol hunt targets <hostile|mob|all> §f没设白名单时认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
@@ -823,6 +829,7 @@ public class PatrolManager {
         huntStuckTicks = 0;
         huntAttempts = 0;
         huntGotoCooldown = 0;
+        sessionHuntType = null;
         if (cancelPath && baritoneLoaded()) sendBaritone("cancel");
     }
 
@@ -906,9 +913,11 @@ public class PatrolManager {
      */
     private static boolean matchesTargetFilter(Entity e) {
         if (!(e instanceof LivingEntity) || !e.isAlive() || e == mc.player) return false;
-        String id = typeId(e);
-        if (matchesAnyType(id, config.huntIgnoreTypes)) return false;
         if (e.age < config.huntMinAliveSeconds * 20) return false;
+        String id = typeId(e);
+        // 本次 auto 只认你指着开的那一种（运行时决定，不写配置）
+        if (sessionHuntType != null) return id.equals(sessionHuntType);
+        if (matchesAnyType(id, config.huntIgnoreTypes)) return false;
         // 白名单优先：设了就只打这几种
         if (!config.huntTypes.isEmpty() && !matchesAnyType(id, config.huntTypes)) return false;
         return switch (config.huntTargets) {

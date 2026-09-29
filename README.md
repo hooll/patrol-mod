@@ -16,7 +16,8 @@
 - **多世界路线**：点位自动绑定记录时所在的世界（记录维度 id，兼容服务器自定义维度）；传送到别的世界会自动切换到该世界的路线，没有点位则停止并提示
 - **自动找怪**：`!patrol hunt` 用视角射线锁定你准星前的那只怪并走过去（不限类型，任何活物都行）；`!patrol hunt auto` 持续搜索附近的怪，一只接一只走过去（移动到哪就重新寻路，怪物打死自动换下一只）
 - **目标类型可配**：自动找怪默认只认原版敌对生物，插件服那种"拿豹猫/狼/村民套自定义模型"的怪不算，用 `!patrol hunt targets mob`（或 `all`）一行切换；`!patrol scan` 能列出附近的实体类型，帮你确认该配哪个
-- **记住你要打的那种怪 + 白/黑名单三线并行**：①用准星 `!patrol hunt` 锁定一次，mod 就把这个类型记成"以后只打这种"（存进配置的 `huntTypes`）；②`!patrol hunt type` 随时手动改"只打某类"；③`!patrol hunt ignore` 把不想打的拉黑（存进 `huntIgnoreTypes`）。三者叠加生效，优先级：**黑名单 > 白名单 > `huntTargets` 粗过滤**（手动 `!patrol hunt` 视角锁定不受名单限制，指谁打谁）
+- **本次只打你指着的那种怪**（不写配置）：`!patrol hunt auto` 开的时候会看你**当前视角**（或刚 `!patrol hunt` 锁定的那只）是什么怪，本次就只找这种——对着雷精灵开 auto 就只打雷精灵，不会顺路跑去打雷兽；想换目标就用视角对着别的怪再开一次 auto
+- **黑白名单（要持久就自己加）**：`!patrol hunt type` = 只打某类（白名单 `huntTypes`），`!patrol hunt ignore` = 排除某类（黑名单 `huntIgnoreTypes`），都写进配置持久生效。判定优先级：**本次视角 > 黑名单 > 白名单 > `huntTargets` 粗过滤**；手动 `!patrol hunt` 视角锁定永远指谁打谁
 - **不追技能特效**：`all` 会排除盔甲架这类装饰实体（技能模型/挂件基本都是隐形盔甲架），另外任何目标都要在客户端存活 ≥ `huntMinAliveSeconds`(默认 1 秒) 才可选——放技能时一闪而过的模型不会被当成怪，Baritone 也就不会被指到会消失的坐标上
 - **循环巡逻**：走完最后一个点回到第一个，无限循环
 - **打怪不误判**：附近有敌对怪时暂停"卡住/单点超时"计时——Baritone 在打怪时本来就会停下
@@ -53,19 +54,22 @@
 找怪（击杀交给 KillAura，本 mod 只负责走过去）：
 
 ```
-!patrol hunt            准星对着怪执行 → 记住它并走过去，同时记住「以后只打这种」
-!patrol hunt auto       开关自动找怪：找最近的目标 → 走过去 → 打死后再找下一只
-!patrol hunt type       改「只打某类」白名单：不带参数=用当前/上次锁定的那种，也可写 ocelot
-!patrol hunt type clear 取消「只打某类」
-!patrol hunt ignore     把某类拉黑（黑名单）：不带参数=把当前/上次锁定的那种拉黑，也可写 zombie
+!patrol hunt            准星对着怪执行 → 记住它并走过去（之后开 auto 本次就只打这种）
+!patrol hunt auto       开关自动找怪：本次只找你视角（或刚锁定）那种，找最近的目标 → 走过去 → 打死后再找下一只
+!patrol hunt type       白名单（写配置，持久）：不带参数=用当前/上次锁定的那种，也可写 ocelot
+!patrol hunt type clear 取消白名单
+!patrol hunt ignore     黑名单（写配置，持久）：不带参数=把当前/上次锁定的那种拉黑，也可写 zombie
 !patrol hunt ignore clear 清空黑名单
-!patrol hunt targets mob  没设「只打某类」时，自动找怪认哪些实体：hostile(默认,原版敌对) / mob(所有生物) / all(除玩家和盔甲架外所有活物)
+!patrol hunt targets mob  没有视角/白名单限定时，自动找怪认哪些实体：hostile(默认,原版敌对) / mob(所有生物) / all(除玩家和盔甲架外所有活物)
 !patrol scan            列出附近活物的实体类型 + 会不会被锁定，用来排查自定义怪
 !patrol hunt stop       停止找怪
 ```
 
-> **想只打一种怪**：准星对着它 → `!patrol hunt`（mod 会自动把 `minecraft:ocelot` 这类类型记进配置的 `huntTypes`）→ `!patrol hunt auto`。
-> 中途想换目标就再锁一次另一种（白名单为空时才会自动写入；要强制改随时用 `!patrol hunt type`）。
+> **只想打一种怪（不写任何配置）**：准星对着它 → `!patrol hunt auto`（或先 `!patrol hunt` 锁一下再 auto）。
+> 本次自动找怪就只认这种类型；想换成别的，视角对着新怪再开一次 auto 即可。`!patrol hunt stop` 结束本次设定。
+>
+> **想长期固定**（跨登录/跨次都生效）再用黑白名单：`!patrol hunt type ocelot` 只打豹猫，`!patrol hunt ignore creeper` 永不选苦力怕。
+> 注意本次视角设定会**压过**黑名单（你是指着它开的），所以拉黑了某种怪之后别再用视角对着它开 auto。
 
 > **自定义模型怪**（插件服用豹猫、狼、村民之类套模型做的怪）：本体不是原版敌对生物，默认过滤认不出来。
 > 先 `!patrol scan` 看它在客户端是什么实体（例如 `minecraft:ocelot`），然后 `!patrol hunt targets mob` 即可；
@@ -84,8 +88,8 @@
 | `!patrol list` | 列出所有点（按世界分组，标出当前世界） |
 | `!patrol clear` | 清空当前世界的点 |
 | `!patrol start [名字...]` | 开始循环巡逻（不带名字 = 当前世界全部点） |
-| `!patrol hunt` | 锁定视角前方的活物并走过去（不限类型），并记住「以后只打这种」 |
-| `!patrol hunt auto` | 开关自动找怪（在目标范围内循环） |
+| `!patrol hunt` | 锁定视角前方的活物并走过去（不限类型），本 auto 会话只打这种 |
+| `!patrol hunt auto` | 开关自动找怪（本次只找视角/刚锁定那种，不写配置） |
 | `!patrol hunt type [类型\|clear]` | 查看/修改「只打某类」白名单（会存进配置） |
 | `!patrol hunt ignore [类型\|clear]` | 查看/修改黑名单，拉黑的类型自动找怪永不选（会存进配置） |
 | `!patrol hunt targets <hostile\|mob\|all>` | 没设白名单时，自动找怪认哪些实体（会存进配置） |
