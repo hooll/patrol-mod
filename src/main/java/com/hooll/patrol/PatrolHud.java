@@ -57,7 +57,8 @@ public class PatrolHud implements HudElement {
                             .append(Text.literal("♥ " + st.huntHealth).formatted(Formatting.RED));
                 }
             } else {
-                line2 = Text.literal("附近没有目标，扫描中…").formatted(Formatting.DARK_GRAY);
+                line2 = Text.literal("附近没有目标，扫描中… ").formatted(Formatting.DARK_GRAY)
+                        .append(Text.literal("[" + st.huntFilter + "]").formatted(Formatting.DARK_GRAY));
             }
             showBar = false;
         } else {

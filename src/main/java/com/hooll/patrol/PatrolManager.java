@@ -69,6 +69,8 @@ public class PatrolManager {
     private static double huntLastX;
     private static double huntLastY;
     private static double huntLastZ;
+    // 最近一次锁定的实体类型，供 "!patrol hunt type"(不带参数) 一键变成"只打这种"
+    private static String huntLastType = null;
     // 已判定"到不了"的目标，冷却期内不再选（key=实体 id）
     private static final Map<Integer, Long> huntFailed = new HashMap<>();
     private static final long HUNT_FAIL_COOLDOWN_MS = 30_000L;
@@ -108,6 +110,7 @@ public class PatrolManager {
                 if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
                 config.huntTargets = mode;
                 if (config.huntIgnoreTypes == null) config.huntIgnoreTypes = new ArrayList<>();
+                if (config.huntTypes == null) config.huntTypes = new ArrayList<>();
             }
         } catch (IOException | RuntimeException e) {
             PatrolMod.LOG.error("failed to load patrol config", e);
@@ -296,6 +299,28 @@ public class PatrolManager {
             return;
         }
 
+        if (arg.equals("type") || arg.equals("only")) {
+            String t = parts.length > 3 ? parts[3].toLowerCase(Locale.ROOT) : "";
+            if (t.equals("clear") || t.equals("off") || t.equals("all")) {
+                config.huntTypes.clear();
+                save();
+                msg("只打某类怪：已关闭（恢复按 " + config.huntTargets + " 过滤）");
+                return;
+            }
+            if (t.isEmpty()) {
+                String id = huntTarget != null && huntTarget.isAlive() ? typeId(huntTarget) : huntLastType;
+                if (id == null) {
+                    msg("先 !patrol hunt 锁定一只怪，再执行一次 !patrol hunt type，就是「只打这种」");
+                    msg("也可以直接写类型: !patrol hunt type ocelot");
+                    return;
+                }
+                setHuntType(id);
+                return;
+            }
+            setHuntType(t);
+            return;
+        }
+
         if (arg.equals("targets") || arg.equals("filter")) {
             if (parts.length < 4) {
                 msg("目标过滤: " + config.huntTargets + "（hostile=原版敌对 / mob=所有生物 / all=除玩家外所有活物）");
@@ -325,8 +350,8 @@ public class PatrolManager {
             huntLastGoto = null;
             huntArrived = false;
             resetHuntTracking(mc);
-            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，过滤 " + config.huntTargets + "，找到就过去，KillAura 负责打）");
-            if (config.huntTargets.equals("hostile")) {
+            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，" + targetSummary() + "，找到就过去，KillAura 负责打）");
+            if (config.huntTargets.equals("hostile") && config.huntTypes.isEmpty()) {
                 event("提示: 自定义怪若不算目标，改 huntTargets 或用 !patrol scan 看类型");
             }
             return;
@@ -345,8 +370,13 @@ public class PatrolManager {
         huntLastGoto = null;
         huntArrived = false;
         resetHuntTracking(mc);
-        msg("锁定 " + target.getName().getString() + " §7[" + typeId(target) + "]§f，距离 "
+        huntLastType = typeId(target);
+        boolean remembered = rememberHuntType(huntLastType);
+        msg("锁定 " + target.getName().getString() + " §7[" + huntLastType + "]§f，距离 "
                 + (int) mc.player.distanceTo(target) + "m，走过去");
+        if (remembered) {
+            msg("已记住「以后只打 " + huntLastType + "」，!patrol hunt auto 会一直找它；取消: !patrol hunt type clear");
+        }
     }
 
     private static void cmdScan() {
@@ -371,7 +401,7 @@ public class PatrolManager {
         }
         List<Map.Entry<String, int[]>> list = new ArrayList<>(stats.entrySet());
         list.sort((a, b) -> Integer.compare(b.getValue()[0], a.getValue()[0]));
-        msg("附近 " + (int) range + " 格活物（过滤 " + config.huntTargets + "，§a✔§f=会自动锁定）:");
+        msg("附近 " + (int) range + " 格活物（" + targetSummary() + "，§a✔§f=会自动锁定）:");
         int shown = 0;
         for (Map.Entry<String, int[]> en : list) {
             if (shown >= 15) {
@@ -391,12 +421,42 @@ public class PatrolManager {
         }
     }
 
+    /**
+     * 锁定一只怪时顺手把它记成"以后只打这种"。
+     * 只在没手动设过白名单时自动写入，避免覆盖用户自己在配置里写的一串类型。
+     */
+    private static boolean rememberHuntType(String id) {
+        if (matchesAnyType(id, config.huntTypes)) return false;
+        if (!config.huntTypes.isEmpty()) return false;
+        config.huntTypes.add(id);
+        save();
+        return true;
+    }
+
+    private static void setHuntType(String id) {
+        String norm = id.contains(":") ? id.trim().toLowerCase(Locale.ROOT) : "minecraft:" + id.trim().toLowerCase(Locale.ROOT);
+        config.huntTypes.clear();
+        config.huntTypes.add(norm);
+        save();
+        if (huntMode == HuntMode.AUTO) {
+            huntTarget = null;
+            huntLastGoto = null;
+        }
+        msg("只打 " + norm + "（已保存，自动模式立刻生效）；要取消: !patrol hunt type clear");
+    }
+
+    /** 当前"认哪些实体"的一句话描述，聊天/扫描里用 */
+    private static String targetSummary() {
+        if (!config.huntTypes.isEmpty()) return "只找 " + String.join(", ", config.huntTypes);
+        return config.huntTargets;
+    }
+
     private static void cmdReload() {
         load();
         msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
                 + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
                 + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange
-                + " | 目标过滤 " + config.huntTargets + " | 排除 " + config.huntIgnoreTypes.size() + " 种"
+                + " | 目标 " + targetSummary() + " | 排除 " + config.huntIgnoreTypes.size() + " 种"
                 + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次"
                 + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
@@ -429,9 +489,10 @@ public class PatrolManager {
         send("§7  !patrol list          §f列出所有点(按世界分组)");
         send("§7  !patrol clear         §f清空当前世界的点");
         send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
-        send("§7  !patrol hunt          §f记住视角前方那只怪(不限类型),走过去");
+        send("§7  !patrol hunt          §f准星对着怪执行:记住它、走过去,并记住「以后只打这种」");
+        send("§7  !patrol hunt type [类型|clear] §f改「只打某类」(不带参数=当前/上次锁定的那种)");
         send("§7  !patrol hunt auto     §f开关自动找怪(最近的怪→过去→下一只)");
-        send("§7  !patrol hunt targets <hostile|mob|all> §f自动找怪认哪些实体");
+        send("§7  !patrol hunt targets <hostile|mob|all> §f没设白名单时认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
         send("§7  !patrol stop          §f停止巡逻/找怪");
@@ -558,7 +619,8 @@ public class PatrolManager {
                 huntArrived = false;
                 resetHuntTracking(client);
                 if (huntTarget == null) return;
-                event("新目标 " + huntTarget.getName().getString() + " [" + typeId(huntTarget) + "]");
+                huntLastType = typeId(huntTarget);
+                event("新目标 " + huntTarget.getName().getString() + " [" + huntLastType + "]");
             }
         } else {
             if (huntTarget == null || !huntTarget.isAlive()) {
@@ -790,8 +852,11 @@ public class PatrolManager {
      */
     private static boolean matchesTargetFilter(Entity e) {
         if (!(e instanceof LivingEntity) || !e.isAlive() || e == mc.player) return false;
-        if (isIgnoredType(e)) return false;
+        String id = typeId(e);
+        if (matchesAnyType(id, config.huntIgnoreTypes)) return false;
         if (e.age < config.huntMinAliveSeconds * 20) return false;
+        // 白名单优先：设了就只打这几种
+        if (!config.huntTypes.isEmpty() && !matchesAnyType(id, config.huntTypes)) return false;
         return switch (config.huntTargets) {
             case "all" -> !(e instanceof PlayerEntity) && !(e instanceof ArmorStandEntity);
             case "mob" -> e instanceof MobEntity;
@@ -799,9 +864,8 @@ public class PatrolManager {
         };
     }
 
-    private static boolean isIgnoredType(Entity e) {
-        String id = typeId(e);
-        for (String raw : config.huntIgnoreTypes) {
+    private static boolean matchesAnyType(String id, List<String> list) {
+        for (String raw : list) {
             if (raw == null) continue;
             String s = raw.trim().toLowerCase(Locale.ROOT);
             if (s.isEmpty()) continue;
@@ -837,6 +901,7 @@ public class PatrolManager {
         public int huntHealth = -1;
         public int huntAttempts;
         public int huntMaxAttempts;
+        public String huntFilter = "";
     }
 
     public enum HudStatus {
@@ -868,6 +933,7 @@ public class PatrolManager {
             s.hunting = true;
             s.huntAuto = huntMode == HuntMode.AUTO;
             s.huntArrived = huntArrived;
+            s.huntFilter = targetSummary();
             if (huntTarget != null && huntTarget.isAlive()) {
                 s.huntHasTarget = true;
                 s.huntName = huntTarget.getName().getString();
