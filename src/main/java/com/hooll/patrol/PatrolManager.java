@@ -6,6 +6,7 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -101,6 +102,7 @@ public class PatrolManager {
                 if (config.huntArriveRadius <= 0) config.huntArriveRadius = 3.0;
                 if (config.huntStuckSeconds <= 0) config.huntStuckSeconds = 10;
                 if (config.huntMaxAttempts < 0) config.huntMaxAttempts = 3;
+                if (config.huntMinAliveSeconds < 0) config.huntMinAliveSeconds = 1.0;
                 if (config.huntTargets == null) config.huntTargets = "hostile";
                 String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
                 if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
@@ -354,8 +356,10 @@ public class PatrolManager {
         for (Entity e : mc.world.getEntities()) {
             if (!(e instanceof LivingEntity) || e == mc.player) continue;
             if (mc.player.distanceTo(e) > range) continue;
-            int[] s = stats.computeIfAbsent(typeId(e), k -> new int[2]);
-            if (matchesTargetFilter(e)) {
+            int[] s = stats.computeIfAbsent(typeId(e), k -> new int[3]);
+            if (e.age < config.huntMinAliveSeconds * 20) {
+                s[2]++;
+            } else if (matchesTargetFilter(e)) {
                 s[0]++;
             } else {
                 s[1]++;
@@ -376,10 +380,13 @@ public class PatrolManager {
             }
             shown++;
             int[] s = en.getValue();
+            int total = s[0] + s[1] + s[2];
             if (s[0] > 0) {
-                send("§a✔ §f" + en.getKey() + " §7×" + (s[0] + s[1]) + (s[1] > 0 ? " §7(其中 " + s[0] + " 个算目标)" : ""));
+                send("§a✔ §f" + en.getKey() + " §7×" + total + (total > s[0] ? " §7(其中 " + s[0] + " 个算目标)" : ""));
+            } else if (s[2] > 0 && s[1] == 0) {
+                send("§e? §f" + en.getKey() + " §7×" + total + " §8(刚出现，可能只是技能特效)");
             } else {
-                send("§7✘ " + en.getKey() + " ×" + s[1] + " §8(不算目标)");
+                send("§7✘ " + en.getKey() + " ×" + total + " §8(不算目标)");
             }
         }
     }
@@ -390,7 +397,8 @@ public class PatrolManager {
                 + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
                 + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange
                 + " | 目标过滤 " + config.huntTargets + " | 排除 " + config.huntIgnoreTypes.size() + " 种"
-                + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次");
+                + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次"
+                + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
 
     private static void cmdStatus() {
@@ -713,6 +721,9 @@ public class PatrolManager {
 
         Entity best = null;
         double bestDist = Double.MAX_VALUE;
+        // 模型挂件(隐形盔甲架)是次选：优先锁真正的生物本体
+        Entity bestStand = null;
+        double bestStandDist = Double.MAX_VALUE;
         Entity fallback = null;
         double fallbackDist = Double.MAX_VALUE;
 
@@ -722,7 +733,12 @@ public class PatrolManager {
             var hit = e.getBoundingBox().raycast(eye, end);
             if (hit.isPresent()) {
                 double d = hit.get().subtract(eye).length();
-                if (d < bestDist) {
+                if (e instanceof ArmorStandEntity) {
+                    if (d < bestStandDist) {
+                        bestStandDist = d;
+                        bestStand = e;
+                    }
+                } else if (d < bestDist) {
                     bestDist = d;
                     best = e;
                 }
@@ -742,7 +758,9 @@ public class PatrolManager {
                 fallback = e;
             }
         }
-        return best != null ? best : fallback;
+        if (best != null) return best;
+        if (bestStand != null) return bestStand;
+        return fallback;
     }
 
     private static Entity findNearestTarget(MinecraftClient client, double range) {
@@ -766,14 +784,16 @@ public class PatrolManager {
 
     /**
      * 自动找怪/战斗暂停共用的目标判定。
-     * hostile=原版敌对生物；mob=所有生物(含豹猫这类被动、中立)；all=除玩家外所有活物(含盔甲架挂件)。
-     * 插件服的自定义怪常拿豹猫/狼/村民套模型，本体不是 HostileEntity，所以要能放宽。
+     * hostile=原版敌对生物；mob=所有生物(含豹猫这类被动、中立)；all=除玩家和盔甲架外所有活物。
+     * 插件服的自定义怪常拿豹猫/狼/村民套模型，本体不是 HostileEntity，所以要能放宽；
+     * 但技能特效多是隐形盔甲架这类装饰实体，一瞬即逝，靠 age 门槛和盔甲架排除挡掉。
      */
     private static boolean matchesTargetFilter(Entity e) {
         if (!(e instanceof LivingEntity) || !e.isAlive() || e == mc.player) return false;
         if (isIgnoredType(e)) return false;
+        if (e.age < config.huntMinAliveSeconds * 20) return false;
         return switch (config.huntTargets) {
-            case "all" -> !(e instanceof PlayerEntity);
+            case "all" -> !(e instanceof PlayerEntity) && !(e instanceof ArmorStandEntity);
             case "mob" -> e instanceof MobEntity;
             default -> e instanceof HostileEntity;
         };
