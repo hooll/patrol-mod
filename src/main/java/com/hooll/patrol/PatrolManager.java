@@ -1,0 +1,545 @@
+package com.hooll.patrol;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.text.Text;
+
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+public class PatrolManager {
+    private static final MinecraftClient mc = MinecraftClient.getInstance();
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("patrol-points.json");
+
+    private static final int MOB_SCAN_INTERVAL = 5;
+    private static final double ARRIVE_Y_TOLERANCE = 4;
+    private static final int EVENT_SHOW_TICKS = 80;
+
+    private static PatrolConfig config = new PatrolConfig();
+
+    private static boolean active = false;
+    private static List<PatrolPoint> route = new ArrayList<>();
+    private static int routeIndex = 0;
+    private static int retries = 0;
+    private static int stuckTicks = 0;
+    private static int pointTicks = 0;
+    private static double lastX;
+    private static double lastY;
+    private static double lastZ;
+    private static double initialDist = -1;
+    private static String routeDimension = null;
+
+    private static int scanCounter = 0;
+    private static boolean mobsNear = false;
+    private static int combatTicks = 0;
+
+    private static String lastEvent = null;
+    private static int lastEventTicks = 0;
+
+    private static long lastConfigMtime = -1;
+    private static int mtimeCheckCounter = 0;
+
+    // ---------- 配置读写 ----------
+
+    public static void load() {
+        if (!Files.exists(CONFIG_PATH)) return;
+        try (Reader reader = Files.newBufferedReader(CONFIG_PATH, StandardCharsets.UTF_8)) {
+            PatrolConfig loaded = GSON.fromJson(reader, PatrolConfig.class);
+            if (loaded != null) {
+                config = loaded;
+                if (config.points == null) config.points = new ArrayList<>();
+                if (config.baritonePrefix == null || config.baritonePrefix.isEmpty()) config.baritonePrefix = "#";
+                if (config.arriveRadius <= 0) config.arriveRadius = 3.0;
+                if (config.stuckSeconds <= 0) config.stuckSeconds = 20;
+                if (config.pointTimeoutSeconds <= 0) config.pointTimeoutSeconds = 300;
+                if (config.mobRadius <= 0) config.mobRadius = 12.0;
+                if (config.combatFreezeSeconds <= 0) config.combatFreezeSeconds = 240;
+                if (config.maxRetries < 0) config.maxRetries = 1;
+                if (config.hudPosition == null) config.hudPosition = "top-center";
+            }
+        } catch (IOException | RuntimeException e) {
+            PatrolMod.LOG.error("failed to load patrol config", e);
+        }
+        lastConfigMtime = currentMtime();
+    }
+
+    private static long currentMtime() {
+        try {
+            return Files.exists(CONFIG_PATH) ? Files.getLastModifiedTime(CONFIG_PATH).toMillis() : -1;
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    private static void save() {
+        try {
+            Files.createDirectories(CONFIG_PATH.getParent());
+            try (Writer writer = Files.newBufferedWriter(CONFIG_PATH, StandardCharsets.UTF_8)) {
+                GSON.toJson(config, writer);
+            }
+        } catch (IOException e) {
+            PatrolMod.LOG.error("failed to save patrol config", e);
+        }
+        lastConfigMtime = currentMtime();
+    }
+
+    // ---------- 聊天命令 ----------
+
+    public static boolean handleChat(String raw) {
+        String message = raw.trim();
+        String lower = message.toLowerCase(Locale.ROOT);
+        if (!lower.equals("!patrol") && !lower.startsWith("!patrol ")) return false;
+
+        String[] parts = message.split("\\s+");
+        String sub = parts.length > 1 ? parts[1].toLowerCase(Locale.ROOT) : "help";
+        switch (sub) {
+            case "add" -> cmdAdd(parts);
+            case "del", "remove", "rm" -> cmdDel(parts);
+            case "list", "ls" -> cmdList();
+            case "clear" -> cmdClear();
+            case "start", "go" -> cmdStart(parts);
+            case "stop" -> cmdStop();
+            case "reload" -> cmdReload();
+            case "status" -> cmdStatus();
+            default -> cmdHelp();
+        }
+        return true;
+    }
+
+    private static void cmdAdd(String[] parts) {
+        if (mc.player == null || mc.world == null) return;
+        if (parts.length < 3) {
+            msg("用法: !patrol add <名字>（站在要巡逻的位置上执行）");
+            return;
+        }
+        String name = parts[2];
+        String dim = currentDimension();
+        int x = (int) Math.floor(mc.player.getX());
+        int y = (int) Math.floor(mc.player.getY());
+        int z = (int) Math.floor(mc.player.getZ());
+        config.points.removeIf(p -> p.name.equalsIgnoreCase(name) && p.dimension.equals(dim));
+        config.points.add(new PatrolPoint(name, dim, x, y, z));
+        save();
+        msg("已记录 " + name + " (" + shortDim(dim) + " " + x + " " + y + " " + z + ")");
+    }
+
+    private static void cmdDel(String[] parts) {
+        if (parts.length < 3) {
+            msg("用法: !patrol del <名字>");
+            return;
+        }
+        String name = parts[2];
+        String dim = currentDimension();
+        boolean removed = config.points.removeIf(p -> p.name.equalsIgnoreCase(name) && p.dimension.equals(dim));
+        if (removed) {
+            save();
+            msg("已删除 " + name);
+        } else {
+            msg("当前世界没有叫 " + name + " 的点");
+        }
+    }
+
+    private static void cmdList() {
+        if (config.points.isEmpty()) {
+            msg("还没有点位。站到位置上输入 !patrol add <名字>");
+            return;
+        }
+        String cur = currentDimension();
+        msg("共 " + config.points.size() + " 个点:");
+        String lastDim = null;
+        for (PatrolPoint p : config.points) {
+            if (!p.dimension.equals(lastDim)) {
+                lastDim = p.dimension;
+                send("§7— " + shortDim(lastDim) + (lastDim.equals(cur) ? " §a(当前世界)" : ""));
+            }
+            send((p.dimension.equals(cur) ? "§a* " : "§7  ") + "§f" + p.name + " §7(" + p.x + ", " + p.y + ", " + p.z + ")");
+        }
+    }
+
+    private static void cmdClear() {
+        String dim = currentDimension();
+        int before = config.points.size();
+        config.points.removeIf(p -> p.dimension.equals(dim));
+        save();
+        msg("已清空当前世界(" + shortDim(dim) + ")的 " + (before - config.points.size()) + " 个点");
+    }
+
+    private static void cmdStart(String[] parts) {
+        String dim = currentDimension();
+        if (dim == null) return;
+        List<PatrolPoint> candidates = pointsIn(dim);
+        if (candidates.isEmpty()) {
+            msg("当前世界没有点位，先 !patrol add <名字>");
+            return;
+        }
+
+        List<PatrolPoint> newRoute = new ArrayList<>();
+        if (parts.length > 2) {
+            for (int i = 2; i < parts.length; i++) {
+                String name = parts[i];
+                PatrolPoint found = null;
+                for (PatrolPoint p : candidates) {
+                    if (p.name.equalsIgnoreCase(name)) {
+                        found = p;
+                        break;
+                    }
+                }
+                if (found == null) {
+                    msg("当前世界没有点 " + name + "，已忽略");
+                } else {
+                    newRoute.add(found);
+                }
+            }
+            if (newRoute.isEmpty()) {
+                msg("指定的点都不在当前世界");
+                return;
+            }
+        } else {
+            newRoute = candidates;
+        }
+
+        route = newRoute;
+        routeIndex = 0;
+        routeDimension = dim;
+        retries = 0;
+        combatTicks = 0;
+        active = true;
+
+        StringBuilder sb = new StringBuilder();
+        for (PatrolPoint p : route) {
+            if (sb.length() > 0) sb.append(" → ");
+            sb.append(p.name);
+        }
+        msg("开始巡逻(" + route.size() + " 个点): " + sb);
+        gotoCurrent();
+    }
+
+    private static void cmdStop() {
+        if (!active) {
+            msg("当前没有在巡逻");
+            return;
+        }
+        stop();
+        msg("已停止巡逻");
+    }
+
+    private static void cmdReload() {
+        load();
+        msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
+                + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
+                + config.combatFreezeSeconds + "s");
+    }
+
+    private static void cmdStatus() {
+        String ver = version();
+        if (!active) {
+            msg("v" + ver + " 未在巡逻。当前世界 " + shortDim(currentDimension()) + " 有 " + pointsIn(currentDimension()).size() + " 个点");
+            return;
+        }
+        PatrolPoint p = route.get(routeIndex);
+        msg("v" + ver + " 巡逻中 " + (routeIndex + 1) + "/" + route.size() + " → " + p.name + " (" + p.x + ", " + p.y + ", " + p.z + ")"
+                + (mobsNear ? " §e[附近有怪,计时暂停]" : ""));
+    }
+
+    public static String version() {
+        return FabricLoader.getInstance().getModContainer(PatrolMod.MOD_ID)
+                .map(c -> c.getMetadata().getVersion().getFriendlyString())
+                .orElse("?");
+    }
+
+    private static void cmdHelp() {
+        send("§b[巡逻] §f命令:");
+        send("§7  !patrol add <名字>   §f在当前位置记一个点(自动带当前世界)");
+        send("§7  !patrol del <名字>   §f删除当前世界的点");
+        send("§7  !patrol list          §f列出所有点(按世界分组)");
+        send("§7  !patrol clear         §f清空当前世界的点");
+        send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
+        send("§7  !patrol stop          §f停止");
+        send("§7  !patrol status        §f当前状态");
+        send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
+        send("§7屏幕上面板显示实时进度;聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名");
+    }
+
+    // ---------- 巡逻逻辑 ----------
+
+    public static void tick(MinecraftClient client) {
+        if (lastEventTicks > 0) lastEventTicks--;
+
+        // 配置文件被改动就自动重载(每秒查一次 mtime)
+        mtimeCheckCounter++;
+        if (mtimeCheckCounter >= 20) {
+            mtimeCheckCounter = 0;
+            long m = currentMtime();
+            if (m != lastConfigMtime) {
+                load();
+                if (active) event("配置已重载");
+            }
+        }
+
+        if (!active) return;
+        if (client.player == null || client.world == null) return;
+
+        String dim = currentDimension();
+        if (dim == null) return;
+
+        if (!dim.equals(routeDimension)) {
+            List<PatrolPoint> next = pointsIn(dim);
+            if (next.isEmpty()) {
+                msg("已进入 " + shortDim(dim) + "，该世界没有点位，巡逻停止");
+                stop();
+                return;
+            }
+            route = next;
+            routeIndex = 0;
+            retries = 0;
+            combatTicks = 0;
+            routeDimension = dim;
+            event("已切换到 " + shortDim(dim) + " 的路线(" + next.size() + " 个点)");
+            gotoCurrent();
+            return;
+        }
+
+        if (route.isEmpty()) {
+            stop();
+            return;
+        }
+
+        scanCounter++;
+        if (scanCounter >= MOB_SCAN_INTERVAL) {
+            scanCounter = 0;
+            mobsNear = config.pauseNearMobs && hostileNearby(client, config.mobRadius);
+        }
+
+        PatrolPoint p = route.get(routeIndex);
+        double dx = client.player.getX() - (p.x + 0.5);
+        double dz = client.player.getZ() - (p.z + 0.5);
+        double dy = client.player.getY() - p.y;
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+
+        if (horizontal <= config.arriveRadius && Math.abs(dy) <= ARRIVE_Y_TOLERANCE) {
+            advance(false);
+            return;
+        }
+
+        double moved = Math.abs(client.player.getX() - lastX)
+                + Math.abs(client.player.getY() - lastY)
+                + Math.abs(client.player.getZ() - lastZ);
+        lastX = client.player.getX();
+        lastY = client.player.getY();
+        lastZ = client.player.getZ();
+
+        if (mobsNear) {
+            combatTicks++;
+        } else {
+            combatTicks = 0;
+        }
+        boolean combatPause = mobsNear && combatTicks <= config.combatFreezeSeconds * 20;
+
+        if (!combatPause) {
+            pointTicks++;
+            if (moved < 0.02) {
+                stuckTicks++;
+            } else {
+                stuckTicks = 0;
+            }
+        } else if (moved >= 0.02) {
+            stuckTicks = 0;
+        }
+
+        if (stuckTicks >= config.stuckSeconds * 20) {
+            stuckTicks = 0;
+            if (retries < config.maxRetries) {
+                retries++;
+                event("在 " + p.name + " 卡住，重试 " + retries + "/" + config.maxRetries);
+                gotoCurrent();
+            } else {
+                advance(true);
+            }
+            return;
+        }
+
+        if (pointTicks >= config.pointTimeoutSeconds * 20) {
+            advance(true);
+        }
+    }
+
+    private static void gotoCurrent() {
+        if (mc.player == null) return;
+        PatrolPoint p = route.get(routeIndex);
+        baritone("goto " + p.x + " " + p.y + " " + p.z);
+        lastX = mc.player.getX();
+        lastY = mc.player.getY();
+        lastZ = mc.player.getZ();
+        initialDist = distanceTo(mc.player.getX(), mc.player.getY(), mc.player.getZ(), p);
+        stuckTicks = 0;
+        pointTicks = 0;
+        combatTicks = 0;
+    }
+
+    private static void advance(boolean skipped) {
+        if (skipped) event("跳过 " + route.get(routeIndex).name);
+        routeIndex = (routeIndex + 1) % route.size();
+        retries = 0;
+        gotoCurrent();
+    }
+
+    private static void stop() {
+        active = false;
+        route = new ArrayList<>();
+        routeIndex = 0;
+        retries = 0;
+        stuckTicks = 0;
+        pointTicks = 0;
+        combatTicks = 0;
+        mobsNear = false;
+        routeDimension = null;
+        if (baritoneLoaded()) sendBaritone("cancel");
+    }
+
+    // ---------- HUD 数据 ----------
+
+    public static class HudState {
+        public boolean idle;
+        public String extra = "";
+        public int index;
+        public int total;
+        public String name = "";
+        public double distance;
+        public double partial;
+        public HudStatus status = HudStatus.WALKING;
+        public String event;
+    }
+
+    public enum HudStatus {
+        WALKING,
+        COMBAT,
+        RETRY
+    }
+
+    public static String hudPosition() {
+        return config.hudPosition;
+    }
+
+    /** 当前世界的点位名，供 Tab 补全用 */
+    public static List<String> pointNames() {
+        String dim = currentDimension();
+        List<String> names = new ArrayList<>();
+        for (PatrolPoint p : config.points) {
+            if (dim == null || dim.equals(p.dimension)) names.add(p.name);
+        }
+        return names;
+    }
+
+    public static HudState hudState() {
+        if (!config.hud) return null;
+        if (mc.player == null || mc.world == null) return null;
+
+        if (!active) {
+            if (!config.hudWhenIdle) return null;
+            HudState s = new HudState();
+            s.idle = true;
+            s.extra = String.valueOf(pointsIn(currentDimension()).size());
+            return s;
+        }
+        if (route.isEmpty()) return null;
+
+        PatrolPoint p = route.get(routeIndex);
+        HudState s = new HudState();
+        s.index = routeIndex;
+        s.total = route.size();
+        s.name = p.name;
+        s.distance = distanceTo(mc.player.getX(), mc.player.getY(), mc.player.getZ(), p);
+        s.status = mobsNear ? HudStatus.COMBAT : (retries > 0 ? HudStatus.RETRY : HudStatus.WALKING);
+        if (initialDist > 0) {
+            double partial = 1 - s.distance / initialDist;
+            s.partial = Math.max(0, Math.min(1, partial));
+        }
+        if (lastEventTicks > 0) s.event = lastEvent;
+        return s;
+    }
+
+    private static double distanceTo(double px, double py, double pz, PatrolPoint p) {
+        double dx = px - (p.x + 0.5);
+        double dy = py - p.y;
+        double dz = pz - (p.z + 0.5);
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    // ---------- 工具 ----------
+
+    private static boolean hostileNearby(MinecraftClient client, double radius) {
+        if (client.world == null || client.player == null) return false;
+        for (Entity e : client.world.getEntities()) {
+            if (e instanceof HostileEntity && e.isAlive() && e.distanceTo(client.player) <= radius) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean baritoneLoaded() {
+        return FabricLoader.getInstance().isModLoaded("baritone-meteor")
+                || FabricLoader.getInstance().isModLoaded("baritone");
+    }
+
+    private static void sendBaritone(String command) {
+        if (mc.player == null || mc.player.networkHandler == null) return;
+        mc.player.networkHandler.sendChatMessage(config.baritonePrefix + command);
+    }
+
+    private static void baritone(String command) {
+        if (!baritoneLoaded()) {
+            msg("§c未检测到 Baritone(baritone-meteor)，无法寻路，巡逻已停止");
+            stop();
+            return;
+        }
+        sendBaritone(command);
+    }
+
+    private static List<PatrolPoint> pointsIn(String dim) {
+        List<PatrolPoint> list = new ArrayList<>();
+        if (dim == null) return list;
+        for (PatrolPoint p : config.points) {
+            if (dim.equals(p.dimension)) list.add(p);
+        }
+        return list;
+    }
+
+    private static String currentDimension() {
+        if (mc.world == null) return null;
+        return mc.world.getRegistryKey().getValue().toString();
+    }
+
+    private static String shortDim(String dim) {
+        if (dim == null) return "?";
+        int i = dim.indexOf(':');
+        return i >= 0 ? dim.substring(i + 1) : dim;
+    }
+
+    private static void send(String s) {
+        if (mc.player != null) mc.player.sendMessage(Text.literal(s), false);
+    }
+
+    private static void msg(String s) {
+        send("§b[巡逻] §f" + s);
+    }
+
+    /** 自动事件：默认只进 HUD 顶部提示，不发聊天框 */
+    private static void event(String s) {
+        lastEvent = s;
+        lastEventTicks = EVENT_SHOW_TICKS;
+        if (config.chatEvents) msg(s);
+    }
+}

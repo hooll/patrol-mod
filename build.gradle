@@ -1,0 +1,37 @@
+plugins {
+    id 'fabric-loom' version '1.14-SNAPSHOT'
+}
+
+group = 'com.hooll.patrol'
+version = '1.4.1'
+
+base {
+    archivesName = 'patrol-mod'
+}
+
+// 固定产物文件名，更新时直接覆盖，不会出现两个同 ID 版本
+tasks.named('remapJar') {
+    archiveFileName = 'patrol-mod.jar'
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.fabricmc.net/' }
+}
+
+dependencies {
+    minecraft 'com.mojang:minecraft:1.21.11'
+    mappings 'net.fabricmc:yarn:1.21.11+build.3:v2'
+    modImplementation 'net.fabricmc:fabric-loader:0.18.2'
+    modImplementation 'net.fabricmc.fabric-api:fabric-api:0.141.6+1.21.11'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

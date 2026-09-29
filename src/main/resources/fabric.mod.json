@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "patrol-mod",
+  "version": "1.4.1",
+  "name": "Patrol Mod",
+  "description": "多世界循环巡逻：!patrol add/start/stop，由 Baritone 自动寻路，到位切换、卡住重试。",
+  "authors": [
+    "hooll"
+  ],
+  "license": "MIT",
+  "environment": "client",
+  "mixins": [
+    "patrol-mod.mixins.json"
+  ],
+  "entrypoints": {
+    "client": [
+      "com.hooll.patrol.PatrolMod"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.18.2",
+    "minecraft": "1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
