@@ -7,6 +7,9 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.entity.mob.MobEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.registry.Registries;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -18,8 +21,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 public class PatrolManager {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
@@ -82,6 +87,11 @@ public class PatrolManager {
                 if (config.hudPosition == null) config.hudPosition = "top-center";
                 if (config.huntRange <= 0) config.huntRange = 48.0;
                 if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 2.5;
+                if (config.huntTargets == null) config.huntTargets = "hostile";
+                String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
+                if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
+                config.huntTargets = mode;
+                if (config.huntIgnoreTypes == null) config.huntIgnoreTypes = new ArrayList<>();
             }
         } catch (IOException | RuntimeException e) {
             PatrolMod.LOG.error("failed to load patrol config", e);
@@ -126,6 +136,7 @@ public class PatrolManager {
             case "start", "go" -> cmdStart(parts);
             case "stop" -> cmdStop();
             case "hunt", "find", "target" -> cmdHunt(parts);
+            case "scan", "entities", "near" -> cmdScan();
             case "reload" -> cmdReload();
             case "status" -> cmdStatus();
             default -> cmdHelp();
@@ -269,6 +280,22 @@ public class PatrolManager {
             return;
         }
 
+        if (arg.equals("targets") || arg.equals("filter")) {
+            if (parts.length < 4) {
+                msg("目标过滤: " + config.huntTargets + "（hostile=原版敌对 / mob=所有生物 / all=除玩家外所有活物）");
+                return;
+            }
+            String mode = parts[3].toLowerCase(Locale.ROOT);
+            if (!mode.equals("hostile") && !mode.equals("mob") && !mode.equals("all")) {
+                msg("可选值: hostile / mob / all");
+                return;
+            }
+            config.huntTargets = mode;
+            save();
+            msg("目标过滤 = " + mode + "（已保存，立即生效）");
+            return;
+        }
+
         if (arg.equals("auto")) {
             if (huntMode == HuntMode.AUTO) {
                 endHunt(true);
@@ -281,14 +308,17 @@ public class PatrolManager {
             huntTarget = null;
             huntLastGoto = null;
             huntArrived = false;
-            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，找到就过去，KillAura 负责打）");
+            msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，过滤 " + config.huntTargets + "，找到就过去，KillAura 负责打）");
+            if (config.huntTargets.equals("hostile")) {
+                event("提示: 自定义怪若不算目标，改 huntTargets 或用 !patrol scan 看类型");
+            }
             return;
         }
 
         if (mc.player == null || mc.world == null) return;
         Entity target = findInView(config.huntRange);
         if (target == null) {
-            msg("视角前方 " + (int) config.huntRange + " 格内没找到活物（准星对着它再执行）");
+            msg("视角前方 " + (int) config.huntRange + " 格内没找到活物（准星对着它再执行，!patrol scan 可看附近有哪些实体）");
             return;
         }
         clearPatrolState();
@@ -297,14 +327,53 @@ public class PatrolManager {
         huntTarget = target;
         huntLastGoto = null;
         huntArrived = false;
-        msg("锁定 " + target.getName().getString() + "，距离 " + (int) mc.player.distanceTo(target) + "m，走过去");
+        msg("锁定 " + target.getName().getString() + " §7[" + typeId(target) + "]§f，距离 "
+                + (int) mc.player.distanceTo(target) + "m，走过去");
+    }
+
+    private static void cmdScan() {
+        if (mc.player == null || mc.world == null) return;
+        double range = config.huntRange;
+        Map<String, int[]> stats = new LinkedHashMap<>();
+        for (Entity e : mc.world.getEntities()) {
+            if (!(e instanceof LivingEntity) || e == mc.player) continue;
+            if (mc.player.distanceTo(e) > range) continue;
+            int[] s = stats.computeIfAbsent(typeId(e), k -> new int[2]);
+            if (matchesTargetFilter(e)) {
+                s[0]++;
+            } else {
+                s[1]++;
+            }
+        }
+        if (stats.isEmpty()) {
+            msg("附近 " + (int) range + " 格内没有活物");
+            return;
+        }
+        List<Map.Entry<String, int[]>> list = new ArrayList<>(stats.entrySet());
+        list.sort((a, b) -> Integer.compare(b.getValue()[0], a.getValue()[0]));
+        msg("附近 " + (int) range + " 格活物（过滤 " + config.huntTargets + "，§a✔§f=会自动锁定）:");
+        int shown = 0;
+        for (Map.Entry<String, int[]> en : list) {
+            if (shown >= 15) {
+                send("§7  …还有 " + (list.size() - shown) + " 种");
+                break;
+            }
+            shown++;
+            int[] s = en.getValue();
+            if (s[0] > 0) {
+                send("§a✔ §f" + en.getKey() + " §7×" + (s[0] + s[1]) + (s[1] > 0 ? " §7(其中 " + s[0] + " 个算目标)" : ""));
+            } else {
+                send("§7✘ " + en.getKey() + " ×" + s[1] + " §8(不算目标)");
+            }
+        }
     }
 
     private static void cmdReload() {
         load();
         msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
                 + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
-                + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange);
+                + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange
+                + " | 目标过滤 " + config.huntTargets + " | 排除 " + config.huntIgnoreTypes.size() + " 种");
     }
 
     private static void cmdStatus() {
@@ -335,9 +404,11 @@ public class PatrolManager {
         send("§7  !patrol list          §f列出所有点(按世界分组)");
         send("§7  !patrol clear         §f清空当前世界的点");
         send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
-        send("§7  !patrol hunt          §f记住视角前方那只怪,走过去(准星对着它)");
-        send("§7  !patrol hunt auto     §f开关自动找怪(找最近的敌对怪→过去→下一只)");
+        send("§7  !patrol hunt          §f记住视角前方那只怪(不限类型),走过去");
+        send("§7  !patrol hunt auto     §f开关自动找怪(最近的怪→过去→下一只)");
+        send("§7  !patrol hunt targets <hostile|mob|all> §f自动找怪认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");
+        send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
         send("§7  !patrol stop          §f停止巡逻/找怪");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
         send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
@@ -395,7 +466,7 @@ public class PatrolManager {
         scanCounter++;
         if (scanCounter >= MOB_SCAN_INTERVAL) {
             scanCounter = 0;
-            mobsNear = config.pauseNearMobs && hostileNearby(client, config.mobRadius);
+            mobsNear = config.pauseNearMobs && targetsNearby(client, config.mobRadius);
         }
 
         PatrolPoint p = route.get(routeIndex);
@@ -456,11 +527,11 @@ public class PatrolManager {
 
         if (huntMode == HuntMode.AUTO) {
             if (huntTarget == null || !huntTarget.isAlive()) {
-                huntTarget = findNearestHostile(client, config.huntRange);
+                huntTarget = findNearestTarget(client, config.huntRange);
                 huntLastGoto = null;
                 huntArrived = false;
                 if (huntTarget == null) return;
-                event("新目标 " + huntTarget.getName().getString());
+                event("新目标 " + huntTarget.getName().getString() + " [" + typeId(huntTarget) + "]");
             }
         } else {
             if (huntTarget == null || !huntTarget.isAlive()) {
@@ -595,12 +666,12 @@ public class PatrolManager {
         return best != null ? best : fallback;
     }
 
-    private static Entity findNearestHostile(MinecraftClient client, double range) {
+    private static Entity findNearestTarget(MinecraftClient client, double range) {
         if (client.world == null || client.player == null) return null;
         Entity best = null;
         double bestDist = range;
         for (Entity e : client.world.getEntities()) {
-            if (!(e instanceof HostileEntity) || !e.isAlive()) continue;
+            if (!matchesTargetFilter(e)) continue;
             double d = client.player.distanceTo(e);
             if (d < bestDist) {
                 bestDist = d;
@@ -608,6 +679,37 @@ public class PatrolManager {
             }
         }
         return best;
+    }
+
+    /**
+     * 自动找怪/战斗暂停共用的目标判定。
+     * hostile=原版敌对生物；mob=所有生物(含豹猫这类被动、中立)；all=除玩家外所有活物(含盔甲架挂件)。
+     * 插件服的自定义怪常拿豹猫/狼/村民套模型，本体不是 HostileEntity，所以要能放宽。
+     */
+    private static boolean matchesTargetFilter(Entity e) {
+        if (!(e instanceof LivingEntity) || !e.isAlive() || e == mc.player) return false;
+        if (isIgnoredType(e)) return false;
+        return switch (config.huntTargets) {
+            case "all" -> !(e instanceof PlayerEntity);
+            case "mob" -> e instanceof MobEntity;
+            default -> e instanceof HostileEntity;
+        };
+    }
+
+    private static boolean isIgnoredType(Entity e) {
+        String id = typeId(e);
+        for (String raw : config.huntIgnoreTypes) {
+            if (raw == null) continue;
+            String s = raw.trim().toLowerCase(Locale.ROOT);
+            if (s.isEmpty()) continue;
+            if (id.equals(s) || id.equals("minecraft:" + s)) return true;
+        }
+        return false;
+    }
+
+    private static String typeId(Entity e) {
+        var id = Registries.ENTITY_TYPE.getId(e.getType());
+        return id == null ? "?" : id.toString();
     }
 
     // ---------- HUD 数据 ----------
@@ -706,10 +808,10 @@ public class PatrolManager {
 
     // ---------- 工具 ----------
 
-    private static boolean hostileNearby(MinecraftClient client, double radius) {
+    private static boolean targetsNearby(MinecraftClient client, double radius) {
         if (client.world == null || client.player == null) return false;
         for (Entity e : client.world.getEntities()) {
-            if (e instanceof HostileEntity && e.isAlive() && e.distanceTo(client.player) <= radius) {
+            if (matchesTargetFilter(e) && e.distanceTo(client.player) <= radius) {
                 return true;
             }
         }

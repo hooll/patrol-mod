@@ -23,6 +23,11 @@ public class PatrolConfig {
     // 找怪
     public double huntRange = 48.0;
     public double huntRetargetDistance = 2.5;
+    // 自动找怪认哪些实体：hostile=原版敌对生物 / mob=所有生物(含豹猫这类被动、中立) / all=除玩家外所有活物(含盔甲架)
+    // 插件服的自定义怪常拿豹猫、狼、村民这类实体套模型，这种情况用 mob 或 all
+    public String huntTargets = "hostile";
+    // 任何模式下都排除的实体类型，写 "minecraft:villager" 或简写 "villager"
+    public List<String> huntIgnoreTypes = new ArrayList<>();
 
     // 屏幕状态面板（只有自己可见）
     public boolean hud = true;
