@@ -16,7 +16,7 @@
 - **多世界路线**：点位自动绑定记录时所在的世界（记录维度 id，兼容服务器自定义维度）；传送到别的世界会自动切换到该世界的路线，没有点位则停止并提示
 - **自动找怪**：`!patrol hunt` 用视角射线锁定你准星前的那只怪并走过去（不限类型，任何活物都行）；`!patrol hunt auto` 持续搜索附近的怪，一只接一只走过去（移动到哪就重新寻路，怪物打死自动换下一只）
 - **目标类型可配**：自动找怪默认只认原版敌对生物，插件服那种"拿豹猫/狼/村民套自定义模型"的怪不算，用 `!patrol hunt targets mob`（或 `all`）一行切换；`!patrol scan` 能列出附近的实体类型，帮你确认该配哪个
-- **记住你要打的那种怪**：用准星 `!patrol hunt` 锁定一次，mod 就把这个类型记成"以后只打这种"（存在配置里），之后 `!patrol hunt auto` 一直照它打，不会再顺路去打别的怪（例如只打豹猫模型的雷精灵，不去打苦力怕模型的雷兽）；`!patrol hunt type` 可改，`!patrol hunt type clear` 取消
+- **记住你要打的那种怪 + 白/黑名单三线并行**：①用准星 `!patrol hunt` 锁定一次，mod 就把这个类型记成"以后只打这种"（存进配置的 `huntTypes`）；②`!patrol hunt type` 随时手动改"只打某类"；③`!patrol hunt ignore` 把不想打的拉黑（存进 `huntIgnoreTypes`）。三者叠加生效，优先级：**黑名单 > 白名单 > `huntTargets` 粗过滤**（手动 `!patrol hunt` 视角锁定不受名单限制，指谁打谁）
 - **不追技能特效**：`all` 会排除盔甲架这类装饰实体（技能模型/挂件基本都是隐形盔甲架），另外任何目标都要在客户端存活 ≥ `huntMinAliveSeconds`(默认 1 秒) 才可选——放技能时一闪而过的模型不会被当成怪，Baritone 也就不会被指到会消失的坐标上
 - **循环巡逻**：走完最后一个点回到第一个，无限循环
 - **打怪不误判**：附近有敌对怪时暂停"卡住/单点超时"计时——Baritone 在打怪时本来就会停下
@@ -55,8 +55,10 @@
 ```
 !patrol hunt            准星对着怪执行 → 记住它并走过去，同时记住「以后只打这种」
 !patrol hunt auto       开关自动找怪：找最近的目标 → 走过去 → 打死后再找下一只
-!patrol hunt type       改「只打某类」：不带参数=用当前/上次锁定的那种，也可写 ocelot
+!patrol hunt type       改「只打某类」白名单：不带参数=用当前/上次锁定的那种，也可写 ocelot
 !patrol hunt type clear 取消「只打某类」
+!patrol hunt ignore     把某类拉黑（黑名单）：不带参数=把当前/上次锁定的那种拉黑，也可写 zombie
+!patrol hunt ignore clear 清空黑名单
 !patrol hunt targets mob  没设「只打某类」时，自动找怪认哪些实体：hostile(默认,原版敌对) / mob(所有生物) / all(除玩家和盔甲架外所有活物)
 !patrol scan            列出附近活物的实体类型 + 会不会被锁定，用来排查自定义怪
 !patrol hunt stop       停止找怪
@@ -85,6 +87,7 @@
 | `!patrol hunt` | 锁定视角前方的活物并走过去（不限类型），并记住「以后只打这种」 |
 | `!patrol hunt auto` | 开关自动找怪（在目标范围内循环） |
 | `!patrol hunt type [类型\|clear]` | 查看/修改「只打某类」白名单（会存进配置） |
+| `!patrol hunt ignore [类型\|clear]` | 查看/修改黑名单，拉黑的类型自动找怪永不选（会存进配置） |
 | `!patrol hunt targets <hostile\|mob\|all>` | 没设白名单时，自动找怪认哪些实体（会存进配置） |
 | `!patrol scan` | 列出附近活物的实体类型，排查自定义怪 |
 | `!patrol hunt stop` | 停止找怪 |

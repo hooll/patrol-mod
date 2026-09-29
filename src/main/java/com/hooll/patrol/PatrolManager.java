@@ -304,20 +304,43 @@ public class PatrolManager {
             if (t.equals("clear") || t.equals("off") || t.equals("all")) {
                 config.huntTypes.clear();
                 save();
+                if (huntMode == HuntMode.AUTO) huntTarget = null;
                 msg("只打某类怪：已关闭（恢复按 " + config.huntTargets + " 过滤）");
                 return;
             }
             if (t.isEmpty()) {
-                String id = huntTarget != null && huntTarget.isAlive() ? typeId(huntTarget) : huntLastType;
+                String id = currentHuntTypeId();
                 if (id == null) {
-                    msg("先 !patrol hunt 锁定一只怪，再执行一次 !patrol hunt type，就是「只打这种」");
-                    msg("也可以直接写类型: !patrol hunt type ocelot");
+                    msg("当前「只打」白名单: " + (config.huntTypes.isEmpty() ? "（空）" : String.join(", ", config.huntTypes)));
+                    msg("用法: 先 !patrol hunt 锁定一只，再 !patrol hunt type；或直接 !patrol hunt type ocelot");
                     return;
                 }
                 setHuntType(id);
                 return;
             }
             setHuntType(t);
+            return;
+        }
+
+        if (arg.equals("ignore") || arg.equals("blacklist")) {
+            String t = parts.length > 3 ? parts[3].toLowerCase(Locale.ROOT) : "";
+            if (t.equals("clear") || t.equals("off") || t.equals("reset")) {
+                config.huntIgnoreTypes.clear();
+                save();
+                msg("黑名单已清空");
+                return;
+            }
+            if (t.isEmpty()) {
+                String id = currentHuntTypeId();
+                if (id == null) {
+                    msg("当前黑名单: " + (config.huntIgnoreTypes.isEmpty() ? "（空）" : String.join(", ", config.huntIgnoreTypes)));
+                    msg("用法: !patrol hunt ignore <类型>；或锁定一只怪后 !patrol hunt ignore 把这种拉黑");
+                    return;
+                }
+                addHuntIgnore(id);
+                return;
+            }
+            addHuntIgnore(t);
             return;
         }
 
@@ -433,6 +456,28 @@ public class PatrolManager {
         return true;
     }
 
+    /** 正在追的目标类型，没有就用上次锁定的 */
+    private static String currentHuntTypeId() {
+        if (huntTarget != null && huntTarget.isAlive()) return typeId(huntTarget);
+        return huntLastType;
+    }
+
+    private static void addHuntIgnore(String id) {
+        String norm = id.contains(":") ? id.trim().toLowerCase(Locale.ROOT) : "minecraft:" + id.trim().toLowerCase(Locale.ROOT);
+        if (matchesAnyType(norm, config.huntIgnoreTypes)) {
+            msg(norm + " 已经在黑名单里了");
+            return;
+        }
+        config.huntIgnoreTypes.add(norm);
+        save();
+        if (huntTarget != null && typeId(huntTarget).equals(norm)) {
+            huntTarget = null;
+            huntLastGoto = null;
+            if (baritoneLoaded()) sendBaritone("cancel");
+        }
+        msg("已拉黑 " + norm + "（自动找怪不会再选它；!patrol hunt ignore clear 清空）");
+    }
+
     private static void setHuntType(String id) {
         String norm = id.contains(":") ? id.trim().toLowerCase(Locale.ROOT) : "minecraft:" + id.trim().toLowerCase(Locale.ROOT);
         config.huntTypes.clear();
@@ -451,6 +496,12 @@ public class PatrolManager {
         return config.huntTargets;
     }
 
+    /** 白名单 + 黑名单一起的描述 */
+    private static String huntFilterLine() {
+        return "目标: " + targetSummary()
+                + (config.huntIgnoreTypes.isEmpty() ? "" : " | 排除: " + String.join(", ", config.huntIgnoreTypes));
+    }
+
     private static void cmdReload() {
         load();
         msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
@@ -466,11 +517,13 @@ public class PatrolManager {
         if (huntMode == HuntMode.AUTO) {
             msg("v" + ver + " 自动找怪中" + (huntTarget != null && huntTarget.isAlive()
                     ? " → " + huntTarget.getName().getString() + " (" + (int) mc.player.distanceTo(huntTarget) + "m)" : " (扫描中)"));
+            msg("§7" + huntFilterLine());
             return;
         }
         if (huntMode == HuntMode.SINGLE) {
             msg("v" + ver + " 锁定目标" + (huntTarget != null && huntTarget.isAlive()
                     ? " " + huntTarget.getName().getString() + " (" + (int) mc.player.distanceTo(huntTarget) + "m)" : " (已消失)"));
+            msg("§7" + huntFilterLine());
             return;
         }
         if (!active) {
@@ -490,7 +543,8 @@ public class PatrolManager {
         send("§7  !patrol clear         §f清空当前世界的点");
         send("§7  !patrol start [名字...] §f开始循环巡逻(不带名字=当前世界全部点)");
         send("§7  !patrol hunt          §f准星对着怪执行:记住它、走过去,并记住「以后只打这种」");
-        send("§7  !patrol hunt type [类型|clear] §f改「只打某类」(不带参数=当前/上次锁定的那种)");
+        send("§7  !patrol hunt type [类型|clear]   §f只打某类(白名单)，不带参数=当前/上次锁定那种");
+        send("§7  !patrol hunt ignore [类型|clear] §f排除某类(黑名单)，不带参数=把当前/上次锁定那种拉黑");
         send("§7  !patrol hunt auto     §f开关自动找怪(最近的怪→过去→下一只)");
         send("§7  !patrol hunt targets <hostile|mob|all> §f没设白名单时认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");

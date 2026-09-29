@@ -36,6 +36,8 @@ public final class PatrolSuggestions {
                         .then(LiteralArgumentBuilder.<CommandSource>literal("auto"))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("type")
                                 .then(LiteralArgumentBuilder.<CommandSource>literal("clear")))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("ignore")
+                                .then(LiteralArgumentBuilder.<CommandSource>literal("clear")))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("targets")
                                 .then(LiteralArgumentBuilder.<CommandSource>literal("hostile"))
                                 .then(LiteralArgumentBuilder.<CommandSource>literal("mob"))
