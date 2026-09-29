@@ -22,7 +22,16 @@ public class PatrolConfig {
 
     // 找怪
     public double huntRange = 48.0;
-    public double huntRetargetDistance = 2.5;
+    // 目标移动超过这个距离才重新下发 goto（调大能减少 Baritone 重复报路的声音）
+    public double huntRetargetDistance = 4.0;
+    // 两次重发 goto 之间的最小间隔(秒)，防止怪物走动导致刷屏
+    public double huntMinRetargetIntervalSeconds = 3.0;
+    // 距目标多少格算"到了"，交给 KillAura
+    public double huntArriveRadius = 3.0;
+    // 多少秒完全没位移算"过不去"(Baritone 算不出路径时会停着不动)
+    public int huntStuckSeconds = 10;
+    // 每个目标最多重发几次 goto，用完就取消并跳过(自动模式换下一只)
+    public int huntMaxAttempts = 3;
     // 自动找怪认哪些实体：hostile=原版敌对生物 / mob=所有生物(含豹猫这类被动、中立) / all=除玩家外所有活物(含盔甲架)
     // 插件服的自定义怪常拿豹猫、狼、村民这类实体套模型，这种情况用 mob 或 all
     public String huntTargets = "hostile";

@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -61,6 +62,15 @@ public class PatrolManager {
     private static Entity huntTarget = null;
     private static BlockPos huntLastGoto = null;
     private static boolean huntArrived = false;
+    private static int huntGotoCooldown = 0;
+    private static int huntStuckTicks = 0;
+    private static int huntAttempts = 0;
+    private static double huntLastX;
+    private static double huntLastY;
+    private static double huntLastZ;
+    // 已判定"到不了"的目标，冷却期内不再选（key=实体 id）
+    private static final Map<Integer, Long> huntFailed = new HashMap<>();
+    private static final long HUNT_FAIL_COOLDOWN_MS = 30_000L;
 
     private static String lastEvent = null;
     private static int lastEventTicks = 0;
@@ -86,7 +96,11 @@ public class PatrolManager {
                 if (config.maxRetries < 0) config.maxRetries = 1;
                 if (config.hudPosition == null) config.hudPosition = "top-center";
                 if (config.huntRange <= 0) config.huntRange = 48.0;
-                if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 2.5;
+                if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 4.0;
+                if (config.huntMinRetargetIntervalSeconds <= 0) config.huntMinRetargetIntervalSeconds = 3.0;
+                if (config.huntArriveRadius <= 0) config.huntArriveRadius = 3.0;
+                if (config.huntStuckSeconds <= 0) config.huntStuckSeconds = 10;
+                if (config.huntMaxAttempts < 0) config.huntMaxAttempts = 3;
                 if (config.huntTargets == null) config.huntTargets = "hostile";
                 String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
                 if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
@@ -308,6 +322,7 @@ public class PatrolManager {
             huntTarget = null;
             huntLastGoto = null;
             huntArrived = false;
+            resetHuntTracking(mc);
             msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，过滤 " + config.huntTargets + "，找到就过去，KillAura 负责打）");
             if (config.huntTargets.equals("hostile")) {
                 event("提示: 自定义怪若不算目标，改 huntTargets 或用 !patrol scan 看类型");
@@ -327,6 +342,7 @@ public class PatrolManager {
         huntTarget = target;
         huntLastGoto = null;
         huntArrived = false;
+        resetHuntTracking(mc);
         msg("锁定 " + target.getName().getString() + " §7[" + typeId(target) + "]§f，距离 "
                 + (int) mc.player.distanceTo(target) + "m，走过去");
     }
@@ -373,7 +389,8 @@ public class PatrolManager {
         msg("配置已重载：点 " + config.points.size() + " 个 | 卡住 " + config.stuckSeconds + "s | 单点上限 "
                 + config.pointTimeoutSeconds + "s | 怪物半径 " + (int) config.mobRadius + " | 战斗暂停上限 "
                 + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange
-                + " | 目标过滤 " + config.huntTargets + " | 排除 " + config.huntIgnoreTypes.size() + " 种");
+                + " | 目标过滤 " + config.huntTargets + " | 排除 " + config.huntIgnoreTypes.size() + " 种"
+                + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次");
     }
 
     private static void cmdStatus() {
@@ -524,12 +541,14 @@ public class PatrolManager {
 
     private static void tickHunt(MinecraftClient client) {
         if (client.player == null || client.world == null) return;
+        if (huntGotoCooldown > 0) huntGotoCooldown--;
 
         if (huntMode == HuntMode.AUTO) {
             if (huntTarget == null || !huntTarget.isAlive()) {
                 huntTarget = findNearestTarget(client, config.huntRange);
                 huntLastGoto = null;
                 huntArrived = false;
+                resetHuntTracking(client);
                 if (huntTarget == null) return;
                 event("新目标 " + huntTarget.getName().getString() + " [" + typeId(huntTarget) + "]");
             }
@@ -552,7 +571,7 @@ public class PatrolManager {
             return;
         }
 
-        if (dist <= config.arriveRadius) {
+        if (dist <= config.huntArriveRadius) {
             if (!huntArrived) {
                 huntArrived = true;
                 if (baritoneLoaded()) sendBaritone("cancel");
@@ -562,6 +581,33 @@ public class PatrolManager {
         }
 
         huntArrived = false;
+
+        // Baritone 算不出路径时会原地不动(还反复重算刷屏)，这里靠"完全没位移"识别
+        double moved = Math.abs(client.player.getX() - huntLastX)
+                + Math.abs(client.player.getY() - huntLastY)
+                + Math.abs(client.player.getZ() - huntLastZ);
+        huntLastX = client.player.getX();
+        huntLastY = client.player.getY();
+        huntLastZ = client.player.getZ();
+        if (moved < 0.05) {
+            huntStuckTicks++;
+        } else {
+            huntStuckTicks = 0;
+        }
+
+        if (huntStuckTicks >= config.huntStuckSeconds * 20) {
+            huntStuckTicks = 0;
+            if (huntAttempts < config.huntMaxAttempts) {
+                huntAttempts++;
+                huntLastGoto = null;
+                huntGotoCooldown = 0;
+                event("过不去，重试 " + huntAttempts + "/" + config.huntMaxAttempts);
+            } else {
+                giveUpHunt(client);
+                return;
+            }
+        }
+
         int tx = (int) Math.floor(huntTarget.getX());
         int ty = (int) Math.floor(huntTarget.getY());
         int tz = (int) Math.floor(huntTarget.getZ());
@@ -572,9 +618,39 @@ public class PatrolManager {
             double mdz = tz - huntLastGoto.getZ();
             needGoto = mdx * mdx + mdy * mdy + mdz * mdz >= config.huntRetargetDistance * config.huntRetargetDistance;
         }
-        if (needGoto) {
+        if (needGoto && huntGotoCooldown <= 0) {
             huntLastGoto = new BlockPos(tx, ty, tz);
+            huntGotoCooldown = (int) Math.round(config.huntMinRetargetIntervalSeconds * 20);
             baritone("goto " + tx + " " + ty + " " + tz);
+        }
+    }
+
+    /** 目标走不过去：取消 Baritone 的 goal(停掉它的反复重算)，记进冷却名单，自动模式换下一只 */
+    private static void giveUpHunt(MinecraftClient client) {
+        Entity t = huntTarget;
+        if (t != null) {
+            huntFailed.put(t.getId(), System.currentTimeMillis() + HUNT_FAIL_COOLDOWN_MS);
+            if (baritoneLoaded()) sendBaritone("cancel");
+            event("到不了 " + t.getName().getString() + "，跳过" + (huntMode == HuntMode.AUTO ? "换下一个" : ""));
+        }
+        if (huntMode == HuntMode.AUTO) {
+            huntTarget = null;
+            huntLastGoto = null;
+            huntArrived = false;
+            resetHuntTracking(client);
+        } else {
+            endHunt(true);
+        }
+    }
+
+    private static void resetHuntTracking(MinecraftClient client) {
+        huntAttempts = 0;
+        huntStuckTicks = 0;
+        huntGotoCooldown = 0;
+        if (client.player != null) {
+            huntLastX = client.player.getX();
+            huntLastY = client.player.getY();
+            huntLastZ = client.player.getZ();
         }
     }
 
@@ -620,6 +696,9 @@ public class PatrolManager {
         huntTarget = null;
         huntLastGoto = null;
         huntArrived = false;
+        huntStuckTicks = 0;
+        huntAttempts = 0;
+        huntGotoCooldown = 0;
         if (cancelPath && baritoneLoaded()) sendBaritone("cancel");
     }
 
@@ -668,10 +747,14 @@ public class PatrolManager {
 
     private static Entity findNearestTarget(MinecraftClient client, double range) {
         if (client.world == null || client.player == null) return null;
+        long now = System.currentTimeMillis();
+        huntFailed.entrySet().removeIf(en -> en.getValue() <= now);
+
         Entity best = null;
         double bestDist = range;
         for (Entity e : client.world.getEntities()) {
             if (!matchesTargetFilter(e)) continue;
+            if (huntFailed.containsKey(e.getId())) continue;
             double d = client.player.distanceTo(e);
             if (d < bestDist) {
                 bestDist = d;
@@ -732,6 +815,8 @@ public class PatrolManager {
         public String huntName = "";
         public int huntDistance;
         public int huntHealth = -1;
+        public int huntAttempts;
+        public int huntMaxAttempts;
     }
 
     public enum HudStatus {
@@ -770,6 +855,8 @@ public class PatrolManager {
                 if (huntTarget instanceof LivingEntity living) {
                     s.huntHealth = (int) Math.ceil(living.getHealth());
                 }
+                s.huntAttempts = huntAttempts;
+                s.huntMaxAttempts = config.huntMaxAttempts;
             }
             if (lastEventTicks > 0) s.event = lastEvent;
             return s;

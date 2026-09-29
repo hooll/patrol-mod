@@ -20,6 +20,7 @@
 - **打怪不误判**：附近有敌对怪时暂停"卡住/单点超时"计时——Baritone 在打怪时本来就会停下
 - **卡住自愈**：连续若干秒没位移算卡住，先重试，仍卡住才跳过该点；单点另有总时长上限
 - **实时 HUD**：屏幕顶部面板显示 `巡逻 3/6 → lb3`、距离、状态（行走中 / 附近有怪 / 卡住重试）和进度条；跳过、切换世界等自动事件以黄色小条提示，不刷聊天框
+- **走不到不会卡死**：Baritone 算不出路径时（怪在墙后、地洞里、或目标方块站不住）会一直挂着 goal 反复重算还刷屏；本 mod 检测到"若干秒完全没位移"就重发 goto，试满次数仍过不去会**主动取消 goal**（Baritone 立刻安静）并把这只记进 30 秒冷却名单，自动模式换下一只
 - **聊天栏 Tab 补全**：输入 `!pat` 按 Tab 补全命令，`del` / `start` 后面能补全点位名
 - **配置热重载**：改完配置文件保存后 1 秒内自动生效，也可以 `!patrol reload` 手动重载
 
@@ -61,6 +62,10 @@
 > 先 `!patrol scan` 看它在客户端是什么实体（例如 `minecraft:ocelot`），然后 `!patrol hunt targets mob` 即可；
 > 若同一场景里还有不想打的（村民 NPC 等），把它们写进配置的 `huntIgnoreTypes`。
 
+> **怪在墙后 / 地洞里，Baritone 说没路径还在刷屏**：服务器上 Baritone 一般不允许挖方块寻路，这种目标本来就到不了。
+> 本 mod 会在 10 秒没位移后自动重发 goto，最多 3 次；仍然不动就取消 goal 并跳过（自动模式换下一只，30 秒内不再选它）。
+> 想让"接近到几格就停"更容易达成，把 `huntArriveRadius` 调大（例如 5）。
+
 | 命令 | 说明 |
 |---|---|
 | `!patrol add <名字>` | 在当前位置记一个点（自动带当前世界） |
@@ -95,7 +100,11 @@
 | `combatFreezeSeconds` | `240` | 战斗中最多暂停计时多久 |
 | `maxRetries` | `1` | 卡住后重试次数，用完才跳过 |
 | `huntRange` | `48.0` | 找怪的射线长度 / 自动找怪半径 |
-| `huntRetargetDistance` | `2.5` | 目标移动超过这个距离就重新寻路 |
+| `huntRetargetDistance` | `4.0` | 目标移动超过这个距离才重新下发 goto（调小会更贴怪，但 Baritone 消息更吵） |
+| `huntMinRetargetIntervalSeconds` | `3.0` | 两次重发 goto 的最小间隔，防刷屏 |
+| `huntArriveRadius` | `3.0` | 距目标多少格算"到了"，交给 KillAura |
+| `huntStuckSeconds` | `10` | 多少秒完全没位移算"过不去" |
+| `huntMaxAttempts` | `3` | 每个目标最多重试几次，用完就取消并跳过（自动模式换下一只） |
 | `hud` | `true` | 状态面板开关 |
 | `hudPosition` | `top-center` | 也可 `top-left` |
 | `hudWhenIdle` | `false` | 没巡逻时也显示面板 |

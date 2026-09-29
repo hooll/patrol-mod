@@ -44,16 +44,20 @@ public class PatrolHud implements HudElement {
                 line1.append(Text.literal("  →  ").formatted(Formatting.DARK_GRAY))
                         .append(Text.literal(st.huntName).formatted(Formatting.YELLOW));
                 line2 = Text.literal("距离 " + st.huntDistance + "m").formatted(Formatting.GRAY)
-                        .append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
-                        .append(st.huntArrived
-                                ? Text.literal("已到达 · 交给 KillAura").formatted(Formatting.GREEN)
-                                : Text.literal("追踪中").formatted(Formatting.AQUA));
+                        .append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY));
+                if (st.huntArrived) {
+                    line2.append(Text.literal("已到达 · 交给 KillAura").formatted(Formatting.GREEN));
+                } else if (st.huntAttempts > 0) {
+                    line2.append(Text.literal("过不去 · 重试 " + st.huntAttempts + "/" + st.huntMaxAttempts).formatted(Formatting.YELLOW));
+                } else {
+                    line2.append(Text.literal("追踪中").formatted(Formatting.AQUA));
+                }
                 if (st.huntHealth >= 0) {
                     line2.append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
                             .append(Text.literal("♥ " + st.huntHealth).formatted(Formatting.RED));
                 }
             } else {
-                line2 = Text.literal("附近没有敌对怪，扫描中…").formatted(Formatting.DARK_GRAY);
+                line2 = Text.literal("附近没有目标，扫描中…").formatted(Formatting.DARK_GRAY);
             }
             showBar = false;
         } else {
