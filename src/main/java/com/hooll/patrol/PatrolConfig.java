@@ -51,6 +51,8 @@ public class PatrolConfig {
     public boolean hudWhenIdle = false;
     // 自动事件(跳过/切世界等)是否也发到聊天框
     public boolean chatEvents = false;
+    // 掉线/服务器重启后重连进世界，自动接着断线前的巡逻/找怪
+    public boolean autoResume = true;
 
     public List<PatrolPoint> points = new ArrayList<>();
 }

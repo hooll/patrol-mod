@@ -77,6 +77,14 @@ public class PatrolManager {
     private static final Map<Integer, Long> huntFailed = new HashMap<>();
     private static final long HUNT_FAIL_COOLDOWN_MS = 30_000L;
 
+    // ---------- 掉线重连恢复 ----------
+    private static boolean resumePending = false;
+    private static int resumeDelayTicks = 0;
+    private static boolean resumeWasPatrol = false;
+    private static boolean resumeWasHunt = false;
+    private static String resumeHuntType = null;
+    private static String resumePointName = null;
+
     private static String lastEvent = null;
     private static int lastEventTicks = 0;
 
@@ -558,6 +566,7 @@ public class PatrolManager {
         send("§7  !patrol stop          §f停止巡逻/找怪");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
         send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
+        send("§7掉线/服务器重启后重连，会自动接着巡逻或找怪(配置 §fautoResume§7 可关)");
     }
 
     // ---------- 主循环 ----------
@@ -574,6 +583,18 @@ public class PatrolManager {
                 load();
                 if (active || huntMode != HuntMode.NONE) event("配置已重载");
             }
+        }
+
+        // 掉线重连：等世界就绪后接着干
+        if (resumePending) {
+            if (client.player == null || client.world == null) return;
+            if (resumeDelayTicks > 0) {
+                resumeDelayTicks--;
+                return;
+            }
+            resumePending = false;
+            applyResume(client);
+            return;
         }
 
         if (huntMode != HuntMode.NONE) {
@@ -819,6 +840,84 @@ public class PatrolManager {
     private static void stop() {
         clearPatrolState();
         if (baritoneLoaded()) sendBaritone("cancel");
+    }
+
+    // ---------- 掉线 / 服务器重启 ----------
+
+    /** 断开时记下正在干什么，并在重连后接着干；同时清掉跨世界的失效引用 */
+    public static void onDisconnect() {
+        resumeWasPatrol = active;
+        resumeWasHunt = huntMode != HuntMode.NONE;
+        // auto 的"视角限定"原样带回；单只锁定模式则退化成自动找同类型
+        resumeHuntType = sessionHuntType;
+        if (resumeHuntType == null && huntMode == HuntMode.SINGLE) resumeHuntType = huntLastType;
+        resumePointName = (active && !route.isEmpty() && routeIndex < route.size())
+                ? route.get(routeIndex).name : null;
+        resumePending = config.autoResume && (resumeWasPatrol || resumeWasHunt);
+        resumeDelayTicks = 60;
+
+        huntTarget = null;
+        huntLastGoto = null;
+        huntArrived = false;
+        huntStuckTicks = 0;
+        huntAttempts = 0;
+        huntGotoCooldown = 0;
+        mobsNear = false;
+        combatTicks = 0;
+        stuckTicks = 0;
+        pointTicks = 0;
+        scanCounter = 0;
+    }
+
+    /** 刚进世界，给区块/实体一点加载时间 */
+    public static void onJoin() {
+        if (resumePending) resumeDelayTicks = 40;
+    }
+
+    private static void applyResume(MinecraftClient client) {
+        if (resumeWasPatrol) {
+            String dim = currentDimension();
+            List<PatrolPoint> list = pointsIn(dim);
+            if (list.isEmpty()) {
+                stop();
+                msg("已重连，但 " + shortDim(dim) + " 没有点位，巡逻不恢复");
+            } else {
+                int idx = 0;
+                if (resumePointName != null) {
+                    for (int i = 0; i < list.size(); i++) {
+                        if (list.get(i).name.equalsIgnoreCase(resumePointName)) {
+                            idx = i;
+                            break;
+                        }
+                    }
+                }
+                route = list;
+                routeIndex = idx;
+                routeDimension = dim;
+                retries = 0;
+                combatTicks = 0;
+                stuckTicks = 0;
+                pointTicks = 0;
+                active = true;
+                msg("已重连，继续巡逻 " + (idx + 1) + "/" + list.size() + " → " + list.get(idx).name);
+                gotoCurrent();
+            }
+        } else if (resumeWasHunt) {
+            if (baritoneLoaded()) sendBaritone("cancel");
+            sessionHuntType = resumeHuntType;
+            huntMode = HuntMode.AUTO;
+            huntTarget = null;
+            huntLastGoto = null;
+            huntArrived = false;
+            resetHuntTracking(client);
+            msg("已重连，继续找怪" + (sessionHuntType != null
+                    ? "（本次只找 " + sessionHuntType + "）" : "（" + targetSummary() + "）")
+                    + "；目标已随断线丢失，改成自动继续找");
+        }
+        resumeWasPatrol = false;
+        resumeWasHunt = false;
+        resumePointName = null;
+        resumeHuntType = null;
     }
 
     private static void endHunt(boolean cancelPath) {
