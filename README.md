@@ -25,6 +25,7 @@
 - **卡住自愈**：连续若干秒没位移算卡住，先重试，仍卡住才跳过该点；单点另有总时长上限
 - **实时 HUD**：屏幕顶部面板显示 `巡逻 3/6 → lb3`、距离、状态（行走中 / 附近有怪 / 卡住重试）和进度条；跳过、切换世界等自动事件以黄色小条提示，不刷聊天框
 - **走不到不会卡死**：Baritone 算不出路径时（怪在墙后、地洞里、或目标方块站不住）会一直挂着 goal 反复重算还刷屏；本 mod 检测到"若干秒完全没位移"就重发 goto，试满次数仍过不去会**主动取消 goal**（Baritone 立刻安静）并把这只记进 30 秒冷却名单，自动模式换下一只
+- **副本里不空转**：寻路时默认不让 Baritone 挖/放方块（`baritoneNoBreak`）。副本服务器方块挖不动，Baritone 会对着墙一直挖、算不出路也不放弃，看着就是"卡在原地挖方块"；关掉后它找不到路就直接结束 goal，交给上面的跳过逻辑。自动找怪如果**连续 `huntMaxGiveUps`(默认 3) 个目标都走不到**，说明当前位置多半根本出不去（被墙/副本困住），会自动停掉并提示，不再一只只空转——自己走一段或换个位置再 `!patrol hunt auto` 即可
 - **聊天栏 Tab 补全**：输入 `!pat` 按 Tab 补全命令，`del` / `start` 后面能补全点位名
 - **配置热重载**：改完配置文件保存后 1 秒内自动生效，也可以 `!patrol reload` 手动重载
 
@@ -114,7 +115,7 @@
 | `pauseNearMobs` | `true` | 附近有怪时暂停计时 |
 | `mobRadius` | `12.0` | 怪物检测半径 |
 | `huntTargets` | `hostile` | 没设白名单时，自动找怪/暂停判定认哪些实体：`hostile` / `mob` / `all` |
-| `huntTypes` | `[]` | 只打这些实体类型（白名单，优先级最高）。`!patrol hunt` 锁定时会自动写入，也可手写 `["ocelot"]` |
+| `huntTypes` | `[]` | 只打这些实体类型（白名单）。用 `!patrol hunt type` 写入，或手写 `["ocelot"]`；**视角限定的"本次只打"是运行时的，不写这里** |
 | `huntIgnoreTypes` | `[]` | 任何模式下都排除的实体类型，如 `["minecraft:villager", "ocelot"]` |
 | `combatFreezeSeconds` | `240` | 战斗中最多暂停计时多久 |
 | `maxRetries` | `1` | 卡住后重试次数，用完才跳过 |
@@ -124,12 +125,14 @@
 | `huntArriveRadius` | `3.0` | 距目标多少格算"到了"，交给 KillAura |
 | `huntStuckSeconds` | `10` | 多少秒完全没位移算"过不去" |
 | `huntMaxAttempts` | `3` | 每个目标最多重试几次，用完就取消并跳过（自动模式换下一只） |
+| `huntMaxGiveUps` | `3` | 自动找怪连续这么多个目标都走不到就停掉（防在被困的房间里空转） |
 | `huntMinAliveSeconds` | `1.0` | 目标至少存活这么久才会被选（挡掉技能特效那种一闪而过的模型实体） |
 | `hud` | `true` | 状态面板开关 |
 | `hudPosition` | `top-center` | 也可 `top-left` |
 | `hudWhenIdle` | `false` | 没巡逻时也显示面板 |
 | `chatEvents` | `false` | 跳过/重试等事件是否也发聊天框 |
 | `autoResume` | `true` | 掉线/服务器重启后重连，自动接着断线前的巡逻/找怪 |
+| `baritoneNoBreak` | `true` | 寻路时禁掉 Baritone 的挖/放方块（副本里挖不动，开着会卡在原地挖） |
 | `baritonePrefix` | `#` | Baritone 命令前缀（一般不用改） |
 
 ## 从源码构建

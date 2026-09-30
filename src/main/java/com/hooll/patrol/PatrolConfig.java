@@ -32,6 +32,9 @@ public class PatrolConfig {
     public int huntStuckSeconds = 10;
     // 每个目标最多重发几次 goto，用完就取消并跳过(自动模式换下一只)
     public int huntMaxAttempts = 3;
+    // 自动找怪连续这么多个目标都"过不去"(被墙/副本挡住)就停掉自动找怪，
+    // 免得一直对着挖不动的方块重试
+    public int huntMaxGiveUps = 3;
     // 目标至少要在客户端"存活"这么多秒才会被选
     // 技能特效/模型通常一瞬即逝，这条能把它们挡在门外
     public double huntMinAliveSeconds = 1.0;
@@ -53,6 +56,9 @@ public class PatrolConfig {
     public boolean chatEvents = false;
     // 掉线/服务器重启后重连进世界，自动接着断线前的巡逻/找怪
     public boolean autoResume = true;
+    // 寻路时禁掉 Baritone 的挖方块/放方块。副本里挖不动，Baritone 只会原地挖到卡死；
+    // 关掉后它算不出路就直接放弃，不会瞎挖
+    public boolean baritoneNoBreak = true;
 
     public List<PatrolPoint> points = new ArrayList<>();
 }

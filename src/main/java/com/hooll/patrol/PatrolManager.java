@@ -76,6 +76,10 @@ public class PatrolManager {
     // 已判定"到不了"的目标，冷却期内不再选（key=实体 id）
     private static final Map<Integer, Long> huntFailed = new HashMap<>();
     private static final long HUNT_FAIL_COOLDOWN_MS = 30_000L;
+    // 自动找怪"连续几个目标都走不到"的计数，够了就停，避免在副本里一直挖
+    private static int huntGiveUpStreak = 0;
+    // 我们是否把 Baritone 的 allowBreak/allowPlace 关掉了，停止时好还原
+    private static boolean noBreakApplied = false;
 
     // ---------- 掉线重连恢复 ----------
     private static boolean resumePending = false;
@@ -114,6 +118,7 @@ public class PatrolManager {
                 if (config.huntArriveRadius <= 0) config.huntArriveRadius = 3.0;
                 if (config.huntStuckSeconds <= 0) config.huntStuckSeconds = 10;
                 if (config.huntMaxAttempts < 0) config.huntMaxAttempts = 3;
+                if (config.huntMaxGiveUps <= 0) config.huntMaxGiveUps = 3;
                 if (config.huntMinAliveSeconds < 0) config.huntMinAliveSeconds = 1.0;
                 if (config.huntTargets == null) config.huntTargets = "hostile";
                 String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
@@ -272,6 +277,7 @@ public class PatrolManager {
         retries = 0;
         combatTicks = 0;
         active = true;
+        applyNoBreak();
 
         StringBuilder sb = new StringBuilder();
         for (PatrolPoint p : route) {
@@ -378,11 +384,13 @@ public class PatrolManager {
             }
             clearPatrolState();
             if (baritoneLoaded()) sendBaritone("cancel");
+            applyNoBreak();
             sessionHuntType = resolveSessionType();
             huntMode = HuntMode.AUTO;
             huntTarget = null;
             huntLastGoto = null;
             huntArrived = false;
+            huntGiveUpStreak = 0;
             resetHuntTracking(mc);
             if (sessionHuntType != null) {
                 msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，本次只找 §f" + sessionHuntType
@@ -408,10 +416,12 @@ public class PatrolManager {
         }
         clearPatrolState();
         if (baritoneLoaded()) sendBaritone("cancel");
+        applyNoBreak();
         huntMode = HuntMode.SINGLE;
         huntTarget = target;
         huntLastGoto = null;
         huntArrived = false;
+        huntGiveUpStreak = 0;
         resetHuntTracking(mc);
         sessionHuntType = null;
         huntLastType = typeId(target);
@@ -523,6 +533,8 @@ public class PatrolManager {
                 + config.combatFreezeSeconds + "s | 找怪半径 " + (int) config.huntRange
                 + " | 目标 " + targetSummary() + " | 排除 " + config.huntIgnoreTypes.size() + " 种"
                 + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次"
+                + " | 连续 " + config.huntMaxGiveUps + " 个目标走不到就停"
+                + " | 禁挖 " + (config.baritoneNoBreak ? "开" : "关")
                 + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
 
@@ -567,6 +579,7 @@ public class PatrolManager {
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
         send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
         send("§7掉线/服务器重启后重连，会自动接着巡逻或找怪(配置 §fautoResume§7 可关)");
+        send("§7寻路时默认不让 Baritone 挖/放方块(副本里挖不动会卡死)；连续几个目标都走不到会停自动找怪(配置 §fbaritoneNoBreak§7 / §fhuntMaxGiveUps§7)");
     }
 
     // ---------- 主循环 ----------
@@ -725,6 +738,7 @@ public class PatrolManager {
         if (dist <= config.huntArriveRadius) {
             if (!huntArrived) {
                 huntArrived = true;
+                huntGiveUpStreak = 0; // 走到了，说明路是通的，连败计数清零
                 if (baritoneLoaded()) sendBaritone("cancel");
                 event("已到达 " + huntTarget.getName().getString());
             }
@@ -779,19 +793,30 @@ public class PatrolManager {
     /** 目标走不过去：取消 Baritone 的 goal(停掉它的反复重算)，记进冷却名单，自动模式换下一只 */
     private static void giveUpHunt(MinecraftClient client) {
         Entity t = huntTarget;
-        if (t != null) {
-            huntFailed.put(t.getId(), System.currentTimeMillis() + HUNT_FAIL_COOLDOWN_MS);
-            if (baritoneLoaded()) sendBaritone("cancel");
-            event("到不了 " + t.getName().getString() + "，跳过" + (huntMode == HuntMode.AUTO ? "换下一个" : ""));
-        }
-        if (huntMode == HuntMode.AUTO) {
-            huntTarget = null;
-            huntLastGoto = null;
-            huntArrived = false;
-            resetHuntTracking(client);
-        } else {
+        String name = t == null ? "目标" : t.getName().getString();
+        if (t != null) huntFailed.put(t.getId(), System.currentTimeMillis() + HUNT_FAIL_COOLDOWN_MS);
+        if (baritoneLoaded()) sendBaritone("cancel");
+
+        if (huntMode != HuntMode.AUTO) {
+            event("到不了 " + name);
             endHunt(true);
+            return;
         }
+
+        // 自动模式：连续好几个目标都走不到，说明当前位置根本出不去（墙/副本），
+        // 别再一只只试下去对着挖不动的方块空转，直接停
+        huntGiveUpStreak++;
+        if (huntGiveUpStreak >= config.huntMaxGiveUps) {
+            event("连续走不到 " + huntGiveUpStreak + " 个目标，停止自动找怪");
+            msg("§e连续 " + huntGiveUpStreak + " 个目标都过不去（多半被墙/副本挡住），已停止自动找怪。先自己走一段或换个位置，再 !patrol hunt auto");
+            endHunt(true);
+            return;
+        }
+        event("到不了 " + name + "，换下一个 (" + huntGiveUpStreak + "/" + config.huntMaxGiveUps + ")");
+        huntTarget = null;
+        huntLastGoto = null;
+        huntArrived = false;
+        resetHuntTracking(client);
     }
 
     private static void resetHuntTracking(MinecraftClient client) {
@@ -840,6 +865,7 @@ public class PatrolManager {
     private static void stop() {
         clearPatrolState();
         if (baritoneLoaded()) sendBaritone("cancel");
+        restoreBreak();
     }
 
     // ---------- 掉线 / 服务器重启 ----------
@@ -899,16 +925,19 @@ public class PatrolManager {
                 stuckTicks = 0;
                 pointTicks = 0;
                 active = true;
+                applyNoBreak();
                 msg("已重连，继续巡逻 " + (idx + 1) + "/" + list.size() + " → " + list.get(idx).name);
                 gotoCurrent();
             }
         } else if (resumeWasHunt) {
             if (baritoneLoaded()) sendBaritone("cancel");
+            applyNoBreak();
             sessionHuntType = resumeHuntType;
             huntMode = HuntMode.AUTO;
             huntTarget = null;
             huntLastGoto = null;
             huntArrived = false;
+            huntGiveUpStreak = 0;
             resetHuntTracking(client);
             msg("已重连，继续找怪" + (sessionHuntType != null
                     ? "（本次只找 " + sessionHuntType + "）" : "（" + targetSummary() + "）")
@@ -928,8 +957,10 @@ public class PatrolManager {
         huntStuckTicks = 0;
         huntAttempts = 0;
         huntGotoCooldown = 0;
+        huntGiveUpStreak = 0;
         sessionHuntType = null;
         if (cancelPath && baritoneLoaded()) sendBaritone("cancel");
+        restoreBreak();
     }
 
     // ---------- 找怪 ----------
@@ -1063,6 +1094,8 @@ public class PatrolManager {
         public int huntHealth = -1;
         public int huntAttempts;
         public int huntMaxAttempts;
+        public int huntGiveUpStreak;
+        public int huntMaxGiveUps;
         public String huntFilter = "";
     }
 
@@ -1096,6 +1129,8 @@ public class PatrolManager {
             s.huntAuto = huntMode == HuntMode.AUTO;
             s.huntArrived = huntArrived;
             s.huntFilter = targetSummary();
+            s.huntGiveUpStreak = huntGiveUpStreak;
+            s.huntMaxGiveUps = config.huntMaxGiveUps;
             if (huntTarget != null && huntTarget.isAlive()) {
                 s.huntHasTarget = true;
                 s.huntName = huntTarget.getName().getString();
@@ -1171,6 +1206,27 @@ public class PatrolManager {
             return;
         }
         sendBaritone(command);
+    }
+
+    /**
+     * 开始寻路前把 Baritone 的挖/放方块关掉。
+     * 副本服务器挖不动方块，Baritone 会一直对着墙挖、算不出路也不放弃，看着就是"卡在原地挖方块"；
+     * 关掉后它找不到路就直接结束 goal，交给我们的"卡住→跳过"逻辑处理。
+     */
+    private static void applyNoBreak() {
+        if (!config.baritoneNoBreak || !baritoneLoaded()) return;
+        if (noBreakApplied) return;
+        noBreakApplied = true;
+        sendBaritone("set allowBreak false");
+        sendBaritone("set allowPlace false");
+    }
+
+    /** 巡逻/找怪结束后还原（只还原我们自己关过的，不动用户手动设的） */
+    private static void restoreBreak() {
+        if (!noBreakApplied) return;
+        noBreakApplied = false;
+        sendBaritone("set allowBreak true");
+        sendBaritone("set allowPlace true");
     }
 
     private static List<PatrolPoint> pointsIn(String dim) {
