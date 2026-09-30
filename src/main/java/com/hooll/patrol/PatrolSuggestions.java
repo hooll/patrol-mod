@@ -31,6 +31,7 @@ public final class PatrolSuggestions {
                         .then(RequiredArgumentBuilder.<CommandSource, String>argument("name", StringArgumentType.word())
                                 .suggests(POINTS)))
                 .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
+                .then(LiteralArgumentBuilder.<CommandSource>literal("back"))
                 .then(LiteralArgumentBuilder.<CommandSource>literal("hunt")
                         .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("auto"))

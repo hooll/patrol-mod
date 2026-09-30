@@ -81,6 +81,21 @@ public class PatrolManager {
     // 我们是否把 Baritone 的 allowBreak/allowPlace 关掉了，停止时好还原
     private static boolean noBreakApplied = false;
 
+    // ---------- 原路退回（被困时用） ----------
+    // 走动时每隔一段距离记一个"面包屑"，被困住就沿原路一小段一小段退回去
+    private static final List<BlockPos> trail = new ArrayList<>();
+    private static final double TRAIL_STEP = 3.0;
+    private static final int TRAIL_MAX = 256;
+    private static final int RETREAT_MAX_SKIPS = 6;
+    private static boolean retreating = false;
+    private static boolean retreatAuto = false;
+    private static BlockPos retreatTarget = null;
+    private static int retreatStuckTicks = 0;
+    private static int retreatSkips = 0;
+    private static double retreatLastX;
+    private static double retreatLastY;
+    private static double retreatLastZ;
+
     // ---------- 掉线重连恢复 ----------
     private static boolean resumePending = false;
     private static int resumeDelayTicks = 0;
@@ -170,6 +185,7 @@ public class PatrolManager {
             case "start", "go" -> cmdStart(parts);
             case "stop" -> cmdStop();
             case "hunt", "find", "target" -> cmdHunt(parts);
+            case "back", "retreat", "return" -> cmdBack();
             case "scan", "entities", "near" -> cmdScan();
             case "reload" -> cmdReload();
             case "status" -> cmdStatus();
@@ -278,6 +294,7 @@ public class PatrolManager {
         combatTicks = 0;
         active = true;
         applyNoBreak();
+        if (config.retreatWhenTrapped) resetTrail(mc);
 
         StringBuilder sb = new StringBuilder();
         for (PatrolPoint p : route) {
@@ -289,6 +306,10 @@ public class PatrolManager {
     }
 
     private static void cmdStop() {
+        if (retreating) {
+            stopRetreat("已停止回退");
+            return;
+        }
         if (huntMode != HuntMode.NONE) {
             endHunt(true);
             msg("已停止找怪");
@@ -391,6 +412,7 @@ public class PatrolManager {
             huntLastGoto = null;
             huntArrived = false;
             huntGiveUpStreak = 0;
+            if (config.retreatWhenTrapped) resetTrail(mc);
             resetHuntTracking(mc);
             if (sessionHuntType != null) {
                 msg("自动找怪：开（半径 " + (int) config.huntRange + " 格，本次只找 §f" + sessionHuntType
@@ -422,6 +444,7 @@ public class PatrolManager {
         huntLastGoto = null;
         huntArrived = false;
         huntGiveUpStreak = 0;
+        if (config.retreatWhenTrapped) resetTrail(mc);
         resetHuntTracking(mc);
         sessionHuntType = null;
         huntLastType = typeId(target);
@@ -469,6 +492,147 @@ public class PatrolManager {
                 send("§7✘ " + en.getKey() + " ×" + total + " §8(不算目标)");
             }
         }
+    }
+
+    private static void cmdBack() {
+        if (mc.player == null || mc.world == null) return;
+        if (retreating) {
+            stopRetreat("已停止回退");
+            return;
+        }
+        if (trail.isEmpty()) {
+            msg("没有可回退的路线记录（还没走动过）。先动一动，或手动走一段再用");
+            return;
+        }
+        startRetreat(false);
+        msg("开始按原路退回（约 " + trail.size() + " 步）…到不了会自动停；再输一次 !patrol back 停下");
+    }
+
+    /** 被困住时沿来时的路一点点退回去（比一次 goto 到远处更容易走得通） */
+    private static void startRetreat(boolean auto) {
+        huntMode = HuntMode.NONE;
+        huntTarget = null;
+        huntLastGoto = null;
+        huntArrived = false;
+        huntStuckTicks = 0;
+        huntAttempts = 0;
+        huntGotoCooldown = 0;
+        huntGiveUpStreak = 0;
+        sessionHuntType = null;
+        active = false;
+        route = new ArrayList<>();
+        routeIndex = 0;
+        if (baritoneLoaded()) sendBaritone("cancel");
+        applyNoBreak();
+        retreating = true;
+        retreatAuto = auto;
+        retreatTarget = null;
+        retreatStuckTicks = 0;
+        retreatSkips = 0;
+        if (mc.player != null) {
+            retreatLastX = mc.player.getX();
+            retreatLastY = mc.player.getY();
+            retreatLastZ = mc.player.getZ();
+        }
+        event(auto ? "被困住，按原路退回入口" : "按原路退回");
+    }
+
+    private static void tickRetreat(MinecraftClient client) {
+        if (client.player == null || client.world == null) return;
+
+        if (retreatTarget == null) {
+            retreatTarget = popTrailTarget(client);
+            if (retreatTarget == null) {
+                finishRetreat("已按原路退回出发点");
+                return;
+            }
+            baritone("goto " + retreatTarget.getX() + " " + retreatTarget.getY() + " " + retreatTarget.getZ());
+            retreatStuckTicks = 0;
+            retreatLastX = client.player.getX();
+            retreatLastY = client.player.getY();
+            retreatLastZ = client.player.getZ();
+            return;
+        }
+
+        double dx = client.player.getX() - (retreatTarget.getX() + 0.5);
+        double dy = client.player.getY() - retreatTarget.getY();
+        double dz = client.player.getZ() - (retreatTarget.getZ() + 0.5);
+        if (Math.sqrt(dx * dx + dz * dz) <= config.arriveRadius && Math.abs(dy) <= ARRIVE_Y_TOLERANCE) {
+            retreatTarget = null;
+            return;
+        }
+
+        double moved = Math.abs(client.player.getX() - retreatLastX)
+                + Math.abs(client.player.getY() - retreatLastY)
+                + Math.abs(client.player.getZ() - retreatLastZ);
+        retreatLastX = client.player.getX();
+        retreatLastY = client.player.getY();
+        retreatLastZ = client.player.getZ();
+        if (moved < 0.05) {
+            retreatStuckTicks++;
+        } else {
+            retreatStuckTicks = 0;
+        }
+
+        if (retreatStuckTicks >= config.huntStuckSeconds * 20) {
+            retreatStuckTicks = 0;
+            retreatSkips++;
+            if (retreatSkips > RETREAT_MAX_SKIPS) {
+                finishRetreat("§e连着几步都走不回去，停止回退（可能得自己爬一下/走几步再继续）");
+                return;
+            }
+            retreatTarget = null; // 丢掉这一步，往后试更早的一步
+        }
+    }
+
+    /** 从最近的面包屑往回取一个离得够远的当目标（近的说明已经走过了，直接吞掉） */
+    private static BlockPos popTrailTarget(MinecraftClient client) {
+        while (!trail.isEmpty()) {
+            BlockPos c = trail.remove(trail.size() - 1);
+            double dx = client.player.getX() - (c.getX() + 0.5);
+            double dy = client.player.getY() - c.getY();
+            double dz = client.player.getZ() - (c.getZ() + 0.5);
+            if (dx * dx + dz * dz > config.arriveRadius * config.arriveRadius || Math.abs(dy) > ARRIVE_Y_TOLERANCE) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    private static void finishRetreat(String why) {
+        retreating = false;
+        retreatAuto = false;
+        retreatTarget = null;
+        if (baritoneLoaded()) sendBaritone("cancel");
+        restoreBreak();
+        msg(why);
+    }
+
+    private static void stopRetreat(String why) {
+        finishRetreat(why);
+    }
+
+    /** 走动时每隔 TRAIL_STEP 记一个点，供被困时原路退回 */
+    private static void recordTrail(MinecraftClient client) {
+        if (client.player == null || retreating) return;
+        double x = client.player.getX();
+        double y = client.player.getY();
+        double z = client.player.getZ();
+        if (!trail.isEmpty()) {
+            BlockPos last = trail.get(trail.size() - 1);
+            double dx = x - (last.getX() + 0.5);
+            double dy = y - last.getY();
+            double dz = z - (last.getZ() + 0.5);
+            if (dx * dx + dy * dy + dz * dz < TRAIL_STEP * TRAIL_STEP) return;
+        }
+        trail.add(new BlockPos((int) Math.floor(x), (int) Math.floor(y), (int) Math.floor(z)));
+        while (trail.size() > TRAIL_MAX) trail.remove(0);
+    }
+
+    private static void resetTrail(MinecraftClient client) {
+        trail.clear();
+        // 起点就是开启时站的地方，退回的终点
+        recordTrail(client);
     }
 
     /** 开 auto 时定本次打什么：先看视角那只，再看刚锁定的那只，都没有就按配置 */
@@ -535,11 +699,16 @@ public class PatrolManager {
                 + " | 找怪没动 " + config.huntStuckSeconds + "s 重试，最多 " + config.huntMaxAttempts + " 次"
                 + " | 连续 " + config.huntMaxGiveUps + " 个目标走不到就停"
                 + " | 禁挖 " + (config.baritoneNoBreak ? "开" : "关")
+                + " | 被困自动退回 " + (config.retreatWhenTrapped ? "开" : "关")
                 + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
 
     private static void cmdStatus() {
         String ver = version();
+        if (retreating) {
+            msg("v" + ver + " 回退中（按原路退回入口，还剩约 " + trail.size() + " 步）" + (retreatAuto ? " §7[自动]" : ""));
+            return;
+        }
         if (huntMode == HuntMode.AUTO) {
             msg("v" + ver + " 自动找怪中" + (huntTarget != null && huntTarget.isAlive()
                     ? " → " + huntTarget.getName().getString() + " (" + (int) mc.player.distanceTo(huntTarget) + "m)" : " (扫描中)"));
@@ -574,8 +743,9 @@ public class PatrolManager {
         send("§7  !patrol hunt ignore [类型|clear] §f黑名单(写进配置,持久):排除某类");
         send("§7  !patrol hunt targets <hostile|mob|all> §f没设白名单时认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");
+        send("§7  !patrol back          §f被困住时按原路退回入口(再输一次停);找怪连续走不到会自动触发");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
-        send("§7  !patrol stop          §f停止巡逻/找怪");
+        send("§7  !patrol stop          §f停止巡逻/找怪/回退");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
         send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
         send("§7掉线/服务器重启后重连，会自动接着巡逻或找怪(配置 §fautoResume§7 可关)");
@@ -609,6 +779,13 @@ public class PatrolManager {
             applyResume(client);
             return;
         }
+
+        if (retreating) {
+            tickRetreat(client);
+            return;
+        }
+
+        if (active || huntMode != HuntMode.NONE) recordTrail(client);
 
         if (huntMode != HuntMode.NONE) {
             tickHunt(client);
@@ -807,9 +984,14 @@ public class PatrolManager {
         // 别再一只只试下去对着挖不动的方块空转，直接停
         huntGiveUpStreak++;
         if (huntGiveUpStreak >= config.huntMaxGiveUps) {
-            event("连续走不到 " + huntGiveUpStreak + " 个目标，停止自动找怪");
-            msg("§e连续 " + huntGiveUpStreak + " 个目标都过不去（多半被墙/副本挡住），已停止自动找怪。先自己走一段或换个位置，再 !patrol hunt auto");
-            endHunt(true);
+            if (config.retreatWhenTrapped && !trail.isEmpty()) {
+                msg("§e连续 " + huntGiveUpStreak + " 个目标都过不去，多半被困住了，改按原路退回入口（想停: !patrol back）");
+                startRetreat(true);
+            } else {
+                event("连续走不到 " + huntGiveUpStreak + " 个目标，停止自动找怪");
+                msg("§e连续 " + huntGiveUpStreak + " 个目标都过不去（多半被墙/副本挡住），已停止自动找怪。先自己走一段或换个位置，再 !patrol hunt auto");
+                endHunt(true);
+            }
             return;
         }
         event("到不了 " + name + "，换下一个 (" + huntGiveUpStreak + "/" + config.huntMaxGiveUps + ")");
@@ -1097,6 +1279,10 @@ public class PatrolManager {
         public int huntGiveUpStreak;
         public int huntMaxGiveUps;
         public String huntFilter = "";
+
+        public boolean retreating;
+        public int retreatLeft;
+        public int retreatDistance;
     }
 
     public enum HudStatus {
@@ -1122,6 +1308,20 @@ public class PatrolManager {
     public static HudState hudState() {
         if (!config.hud) return null;
         if (mc.player == null || mc.world == null) return null;
+
+        if (retreating) {
+            HudState s = new HudState();
+            s.retreating = true;
+            s.retreatLeft = trail.size() + (retreatTarget == null ? 0 : 1);
+            if (retreatTarget != null) {
+                double dx = mc.player.getX() - (retreatTarget.getX() + 0.5);
+                double dy = mc.player.getY() - retreatTarget.getY();
+                double dz = mc.player.getZ() - (retreatTarget.getZ() + 0.5);
+                s.retreatDistance = (int) Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz));
+            }
+            if (lastEventTicks > 0) s.event = lastEvent;
+            return s;
+        }
 
         if (huntMode != HuntMode.NONE) {
             HudState s = new HudState();

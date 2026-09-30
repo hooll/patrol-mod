@@ -59,6 +59,8 @@ public class PatrolConfig {
     // 寻路时禁掉 Baritone 的挖方块/放方块。副本里挖不动，Baritone 只会原地挖到卡死；
     // 关掉后它算不出路就直接放弃，不会瞎挖
     public boolean baritoneNoBreak = true;
+    // 自动找怪连续走不到多个目标(多半被困住)时，自动沿来时记下的路线往后退回起点
+    public boolean retreatWhenTrapped = true;
 
     public List<PatrolPoint> points = new ArrayList<>();
 }
