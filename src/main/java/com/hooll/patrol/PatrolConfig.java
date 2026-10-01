@@ -61,6 +61,9 @@ public class PatrolConfig {
     public boolean baritoneNoBreak = true;
     // 自动找怪连续走不到多个目标(多半被困住)时，自动沿来时记下的路线往后退回起点
     public boolean retreatWhenTrapped = true;
+    // 追踪的目标死亡/消失时，取消 Baritone 当前的寻路目标(就停在原地)；
+    // 关掉则保持原样：继续往它倒下的位置走
+    public boolean cancelOnTargetDeath = true;
 
     public List<PatrolPoint> points = new ArrayList<>();
 }

@@ -37,7 +37,8 @@ public class PatrolManager {
     private static final double ARRIVE_Y_TOLERANCE = 4;
     private static final int EVENT_SHOW_TICKS = 80;
 
-    private static PatrolConfig config = new PatrolConfig();
+    static PatrolConfig config = new PatrolConfig();
+    private static boolean pendingOpenGui = false;
 
     // ---------- 巡逻状态 ----------
     private static boolean active = false;
@@ -118,34 +119,57 @@ public class PatrolManager {
             PatrolConfig loaded = GSON.fromJson(reader, PatrolConfig.class);
             if (loaded != null) {
                 config = loaded;
-                if (config.points == null) config.points = new ArrayList<>();
-                if (config.baritonePrefix == null || config.baritonePrefix.isEmpty()) config.baritonePrefix = "#";
-                if (config.arriveRadius <= 0) config.arriveRadius = 3.0;
-                if (config.stuckSeconds <= 0) config.stuckSeconds = 20;
-                if (config.pointTimeoutSeconds <= 0) config.pointTimeoutSeconds = 300;
-                if (config.mobRadius <= 0) config.mobRadius = 12.0;
-                if (config.combatFreezeSeconds <= 0) config.combatFreezeSeconds = 240;
-                if (config.maxRetries < 0) config.maxRetries = 1;
-                if (config.hudPosition == null) config.hudPosition = "top-center";
-                if (config.huntRange <= 0) config.huntRange = 48.0;
-                if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 4.0;
-                if (config.huntMinRetargetIntervalSeconds <= 0) config.huntMinRetargetIntervalSeconds = 3.0;
-                if (config.huntArriveRadius <= 0) config.huntArriveRadius = 3.0;
-                if (config.huntStuckSeconds <= 0) config.huntStuckSeconds = 10;
-                if (config.huntMaxAttempts < 0) config.huntMaxAttempts = 3;
-                if (config.huntMaxGiveUps <= 0) config.huntMaxGiveUps = 3;
-                if (config.huntMinAliveSeconds < 0) config.huntMinAliveSeconds = 1.0;
-                if (config.huntTargets == null) config.huntTargets = "hostile";
-                String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
-                if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
-                config.huntTargets = mode;
-                if (config.huntIgnoreTypes == null) config.huntIgnoreTypes = new ArrayList<>();
-                if (config.huntTypes == null) config.huntTypes = new ArrayList<>();
+                sanitizeConfig();
             }
         } catch (IOException | RuntimeException e) {
             PatrolMod.LOG.error("failed to load patrol config", e);
         }
         lastConfigMtime = currentMtime();
+    }
+
+    /** 数值兜底：文件/GUI 填了离谱的值时拉回可用范围 */
+    private static void sanitizeConfig() {
+        if (config.points == null) config.points = new ArrayList<>();
+        if (config.baritonePrefix == null || config.baritonePrefix.isEmpty()) config.baritonePrefix = "#";
+        if (config.arriveRadius <= 0) config.arriveRadius = 3.0;
+        if (config.stuckSeconds <= 0) config.stuckSeconds = 20;
+        if (config.pointTimeoutSeconds <= 0) config.pointTimeoutSeconds = 300;
+        if (config.mobRadius <= 0) config.mobRadius = 12.0;
+        if (config.combatFreezeSeconds <= 0) config.combatFreezeSeconds = 240;
+        if (config.maxRetries < 0) config.maxRetries = 1;
+        if (config.hudPosition == null) config.hudPosition = "top-center";
+        if (config.huntRange <= 0) config.huntRange = 48.0;
+        if (config.huntRetargetDistance <= 0) config.huntRetargetDistance = 4.0;
+        if (config.huntMinRetargetIntervalSeconds <= 0) config.huntMinRetargetIntervalSeconds = 3.0;
+        if (config.huntArriveRadius <= 0) config.huntArriveRadius = 3.0;
+        if (config.huntStuckSeconds <= 0) config.huntStuckSeconds = 10;
+        if (config.huntMaxAttempts < 0) config.huntMaxAttempts = 3;
+        if (config.huntMaxGiveUps <= 0) config.huntMaxGiveUps = 3;
+        if (config.huntMinAliveSeconds < 0) config.huntMinAliveSeconds = 1.0;
+        if (config.huntTargets == null) config.huntTargets = "hostile";
+        String mode = config.huntTargets.trim().toLowerCase(Locale.ROOT);
+        if (!mode.equals("mob") && !mode.equals("all")) mode = "hostile";
+        config.huntTargets = mode;
+        if (config.huntIgnoreTypes == null) config.huntIgnoreTypes = new ArrayList<>();
+        if (config.huntTypes == null) config.huntTypes = new ArrayList<>();
+    }
+
+    /** GUI 改完配置：校验数值，按需同步 Baritone 的挖/放开关，再写盘 */
+    static void onConfigEdited() {
+        sanitizeConfig();
+        if (active || huntMode != HuntMode.NONE || retreating) {
+            if (config.baritoneNoBreak) applyNoBreak();
+            else restoreBreak();
+        } else {
+            restoreBreak();
+        }
+        save();
+        event("配置已保存");
+    }
+
+    /** 聊天命令里请求打开配置界面，实际在 tick 里开(避免在聊天处理里直接切屏幕) */
+    static void openConfig() {
+        pendingOpenGui = true;
     }
 
     private static long currentMtime() {
@@ -186,6 +210,7 @@ public class PatrolManager {
             case "stop" -> cmdStop();
             case "hunt", "find", "target" -> cmdHunt(parts);
             case "back", "retreat", "return" -> cmdBack();
+            case "gui", "config", "cfg" -> openConfig();
             case "scan", "entities", "near" -> cmdScan();
             case "reload" -> cmdReload();
             case "status" -> cmdStatus();
@@ -649,7 +674,8 @@ public class PatrolManager {
     }
 
     private static void addHuntIgnore(String id) {
-        String norm = id.contains(":") ? id.trim().toLowerCase(Locale.ROOT) : "minecraft:" + id.trim().toLowerCase(Locale.ROOT);
+        String norm = normalizeTypeId(id);
+        if (norm == null) return;
         if (matchesAnyType(norm, config.huntIgnoreTypes)) {
             msg(norm + " 已经在黑名单里了");
             return;
@@ -665,7 +691,8 @@ public class PatrolManager {
     }
 
     private static void setHuntType(String id) {
-        String norm = id.contains(":") ? id.trim().toLowerCase(Locale.ROOT) : "minecraft:" + id.trim().toLowerCase(Locale.ROOT);
+        String norm = normalizeTypeId(id);
+        if (norm == null) return;
         config.huntTypes.clear();
         config.huntTypes.add(norm);
         save();
@@ -700,6 +727,7 @@ public class PatrolManager {
                 + " | 连续 " + config.huntMaxGiveUps + " 个目标走不到就停"
                 + " | 禁挖 " + (config.baritoneNoBreak ? "开" : "关")
                 + " | 被困自动退回 " + (config.retreatWhenTrapped ? "开" : "关")
+                + " | 目标死后 " + (config.cancelOnTargetDeath ? "取消寻路" : "走到倒地处")
                 + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
 
@@ -744,6 +772,7 @@ public class PatrolManager {
         send("§7  !patrol hunt targets <hostile|mob|all> §f没设白名单时认哪些实体");
         send("§7  !patrol hunt stop     §f停止找怪");
         send("§7  !patrol back          §f被困住时按原路退回入口(再输一次停);找怪连续走不到会自动触发");
+        send("§7  !patrol gui           §f打开配置界面，鼠标改参数(不用手编 JSON)");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
         send("§7  !patrol stop          §f停止巡逻/找怪/回退");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
@@ -756,6 +785,13 @@ public class PatrolManager {
 
     public static void tick(MinecraftClient client) {
         if (lastEventTicks > 0) lastEventTicks--;
+
+        // !patrol gui：等 tick 里再开界面
+        if (pendingOpenGui) {
+            pendingOpenGui = false;
+            client.setScreen(new PatrolConfigScreen(client.currentScreen));
+            return;
+        }
 
         // 配置文件被改动就自动重载(每秒查一次 mtime)
         mtimeCheckCounter++;
@@ -885,18 +921,25 @@ public class PatrolManager {
 
         if (huntMode == HuntMode.AUTO) {
             if (huntTarget == null || !huntTarget.isAlive()) {
+                boolean justLost = huntTarget != null; // 上一只刚死/消失，而不是本来就没目标
                 huntTarget = findNearestTarget(client, config.huntRange);
                 huntLastGoto = null;
                 huntArrived = false;
                 resetHuntTracking(client);
-                if (huntTarget == null) return;
+                if (huntTarget == null) {
+                    // 目标死了又没下一只：按配置停掉 Baritone 的旧 goal，免得它继续往倒下的位置走
+                    if (justLost && config.cancelOnTargetDeath && baritoneLoaded()) {
+                        sendBaritone("cancel");
+                    }
+                    return;
+                }
                 huntLastType = typeId(huntTarget);
                 event("新目标 " + huntTarget.getName().getString() + " [" + huntLastType + "]");
             }
         } else {
             if (huntTarget == null || !huntTarget.isAlive()) {
                 event(huntTarget == null ? "目标已消失" : "目标已被击杀");
-                endHunt(false);
+                endHunt(config.cancelOnTargetDeath);
                 return;
             }
         }
@@ -1252,6 +1295,13 @@ public class PatrolManager {
     private static String typeId(Entity e) {
         var id = Registries.ENTITY_TYPE.getId(e.getType());
         return id == null ? "?" : id.toString();
+    }
+
+    /** "Ocelot" / "minecraft:ocelot" -> "minecraft:ocelot"；空串归 null */
+    static String normalizeTypeId(String raw) {
+        String t = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+        if (t.isEmpty()) return null;
+        return t.contains(":") ? t : "minecraft:" + t;
     }
 
     // ---------- HUD 数据 ----------
