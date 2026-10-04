@@ -18,6 +18,18 @@ public final class PatrolSuggestions {
         return builder.buildFuture();
     };
 
+    private static final SuggestionProvider<CommandSource> MACROS = (ctx, builder) -> {
+        for (String name : PatrolManager.macroNames()) {
+            builder.suggest(name);
+        }
+        return builder.buildFuture();
+    };
+
+    private static RequiredArgumentBuilder<CommandSource, String> macroNameArg() {
+        return RequiredArgumentBuilder.<CommandSource, String>argument("name", StringArgumentType.word())
+                .suggests(MACROS);
+    }
+
     static {
         DISPATCHER.register(LiteralArgumentBuilder.<CommandSource>literal("patrol")
                 .then(LiteralArgumentBuilder.<CommandSource>literal("add")
@@ -33,6 +45,13 @@ public final class PatrolSuggestions {
                 .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
                 .then(LiteralArgumentBuilder.<CommandSource>literal("gui"))
                 .then(LiteralArgumentBuilder.<CommandSource>literal("back"))
+                .then(LiteralArgumentBuilder.<CommandSource>literal("macro")
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("gui"))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("on").then(macroNameArg()))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("off").then(macroNameArg()))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("toggle").then(macroNameArg()))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("run").then(macroNameArg())))
                 .then(LiteralArgumentBuilder.<CommandSource>literal("hunt")
                         .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("auto"))

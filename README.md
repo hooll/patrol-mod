@@ -28,6 +28,7 @@
 - **副本里不空转 + 困住能原路退回**：寻路时默认不让 Baritone 挖/放方块（`baritoneNoBreak`）——副本服务器方块挖不动，Baritone 会对着墙一直挖、算不出路也不放弃，看着就是"卡在原地挖方块"；关掉后它找不到路就直接结束 goal，交给上面的跳过逻辑。走动时每隔几格会记一个"面包屑"；自动找怪**连续 `huntMaxGiveUps`(默认 3) 个目标都走不到**时，说明当前位置多半根本出不去（被墙/高低差困住），会自动**沿面包屑一小段一小段往退回入口**（`!patrol back` 手动同理，再输一次停）——小步后退比一次 goto 到远处更容易走得通，不会再卡死在原地
 - **目标死了不空追**：追踪的目标被击杀/消失时，默认取消 Baritone 当前的寻路目标（就停在原地，等下一只；不会继续往尸体位置走）。想改成"继续走到它倒下的位置"就把 `cancelOnTargetDeath` 关掉
 - **配置 GUI**：`!patrol gui` 打开图形界面，按钮/输入框直接改参数，不用去编 JSON（改完点"保存并关闭"立刻生效）
+- **宏（事件 → 动作）**：配"什么事件发生就自动做什么"。事件 `death`(自己死了) / `respawn`(复活后) / `screen`(打开界面)；动作 `wait`/`goto`(走点位或坐标)/`cmd`(发命令)/`click`(点容器槽位或界面坐标)/`respawn`(点复活)。每条宏单独开关（`!patrol macro on|off <宏名>`，或 GUI 里的"宏开关"），可限定只在找怪/巡逻时触发（`when`）；宏运行时临时挂起巡逻/找怪，跑完自动接回（`resumeAfter`）。典型：副本里死了 → 回副本入口 → 进本界面点确认
 - **聊天栏 Tab 补全**：输入 `!pat` 按 Tab 补全命令，`del` / `start` 后面能补全点位名
 - **配置热重载**：改完配置文件保存后 1 秒内自动生效，也可以 `!patrol reload` 手动重载
 
@@ -101,6 +102,11 @@
 | `!patrol hunt stop` | 停止找怪 |
 | `!patrol back` | 被困住时按来时记下的路线一小段一小段退回入口（再输一次停）；找怪连续走不到会**自动触发** |
 | `!patrol gui` | 打开配置界面（GUI），鼠标改参数，不用手编 JSON |
+| `!patrol macro` | 列出宏和开关状态 |
+| `!patrol macro on\|off\|toggle <宏名>` | 开关某条宏（存进配置） |
+| `!patrol macro run <宏名>` | 立刻手动执行一次（调试用） |
+| `!patrol macro stop` | 中止正在跑的宏 |
+| `!patrol macro gui` | 宏开关界面（也能从配置界面底部的"宏开关"进） |
 | `!patrol stop` | 停止巡逻 / 找怪 / 回退 |
 | `!patrol status` | 当前状态（含 mod 版本） |
 | `!patrol reload` | 重新读取配置文件 |
@@ -142,6 +148,65 @@
 | `retreatWhenTrapped` | `true` | 被困住（找怪连续走不到）时自动沿原路退回入口；`!patrol back` 也能手动触发 |
 | `cancelOnTargetDeath` | `true` | 追踪的目标死亡/消失时取消 Baritone 的寻路（停在原地）；关掉 = 继续走到它倒下的位置 |
 | `baritonePrefix` | `#` | Baritone 命令前缀（一般不用改） |
+
+## 宏（事件 → 动作）
+
+写在 `config/patrol-points.json` 的 `macros` 数组里（GUI 只做开关和手动执行，改步骤请编辑文件）：
+
+```json
+"macros": [
+  {
+    "name": "死亡回副本",
+    "enabled": true,
+    "trigger": "death",
+    "when": "hunt",
+    "cooldownSeconds": 30,
+    "resumeAfter": true,
+    "steps": [
+      { "type": "wait", "seconds": 3 },
+      { "type": "respawn" },
+      { "type": "wait", "seconds": 5 },
+      { "type": "goto", "point": "副本入口" },
+      { "type": "cmd", "text": "/dungeon enter" },
+      { "type": "wait", "seconds": 2 },
+      { "type": "click", "slot": 13 }
+    ]
+  },
+  {
+    "name": "进本界面点确认",
+    "enabled": true,
+    "trigger": "screen",
+    "screenMatch": "副本选择",
+    "steps": [
+      { "type": "wait", "seconds": 1 },
+      { "type": "click", "cx": 260, "cy": 150 }
+    ]
+  }
+]
+```
+
+| 字段 | 说明 |
+|---|---|
+| `trigger` | `death` 自己死了 / `respawn` 复活后 / `screen` 界面打开 |
+| `screenMatch` | `trigger=screen` 时匹配界面标题的**子串**（如 `"副本选择"`）；填 `"container"` = 任意容器界面；留空 = 任意界面（开背包也会触发，建议写上） |
+| `when` | 什么模式才触发：`always`(默认) / `hunt`(找怪中) / `patrol`(巡逻中) |
+| `cooldownSeconds` | 两次触发的最小间隔，防连触发（默认 15） |
+| `resumeAfter` | 宏跑完是否把开始时中断的巡逻/找怪接回来（默认 true） |
+
+动作（`steps` 按顺序执行，每步做完才做下一步）：
+
+| 动作 | 写法 | 说明 |
+|---|---|---|
+| 等 | `{"type":"wait","seconds":3}` | 等几秒 |
+| 走 | `{"type":"goto","point":"入口"}` 或 `{"type":"goto","x":123,"y":64,"z":-45}` | 用 Baritone 走过去；`point` 是**当前世界**的点位名。走到自动下一步，超时（`timeoutSeconds`，默认 120 秒）会中止宏并提示 |
+| 发命令 | `{"type":"cmd","text":"/dungeon enter"}` | 原样发到服务器（服务器命令/聊天）；`#` 开头的会被 Baritone 拦下（如 `#goto ...`） |
+| 点界面 | `{"type":"click","slot":13}` | 点容器界面的第 13 个槽位（需要界面开着） |
+| 点界面 | `{"type":"click","cx":260,"cy":150}` | 在界面坐标 (260,150) 模拟一次点击（点按钮/物品），`button` 默认 0 左键、1 右键 |
+| 复活 | `{"type":"respawn"}` | 死亡画面上点"复活"（等价于客户端请求重生） |
+
+开关与执行：`!patrol macro` 看列表，`!patrol macro on|off|toggle <宏名>` 开关（存进配置），`!patrol macro run <宏名>` 手动跑一次，`!patrol macro stop` 中止；也可以 `!patrol macro gui` 用界面开关。**宏运行时 HUD 会显示当前步骤，巡逻/找怪临时挂起，跑完自动接回**。
+
+> 注意：`click cx/cy` 用的是 GUI 缩放后的坐标（就是界面上看到的像素位置）；不确定就先 `{"type":"wait","seconds":5}` 挂着看一眼，或者先用 `slot` 方式点容器格子。
 
 ## 从源码构建
 

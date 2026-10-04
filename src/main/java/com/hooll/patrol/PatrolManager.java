@@ -4,6 +4,11 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.Click;
+import net.minecraft.client.gui.screen.ChatScreen;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.screen.ingame.ScreenHandlerProvider;
+import net.minecraft.client.input.MouseInput;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
@@ -11,6 +16,7 @@ import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.entity.mob.MobEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.registry.Registries;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
@@ -97,6 +103,21 @@ public class PatrolManager {
     private static double retreatLastY;
     private static double retreatLastZ;
 
+    // ---------- 宏（事件 -> 动作序列） ----------
+    private static PatrolMacro runningMacro = null;
+    private static int macroStepIdx = 0;
+    private static int macroWaitTicks = 0;
+    private static boolean macroStepStarted = false;
+    private static boolean macroGotoSent = false;
+    private static BlockPos macroGotoTarget = null;
+    private static final Map<String, Long> macroLastRun = new HashMap<>();
+    private static boolean macroSuspendedPatrol = false;
+    private static boolean macroSuspendedHunt = false;
+    private static String macroHuntType = null;
+    private static String macroPointName = null;
+    private static Screen lastScreen = null;
+    private static boolean wasDead = false;
+
     // ---------- 掉线重连恢复 ----------
     private static boolean resumePending = false;
     private static int resumeDelayTicks = 0;
@@ -152,6 +173,26 @@ public class PatrolManager {
         config.huntTargets = mode;
         if (config.huntIgnoreTypes == null) config.huntIgnoreTypes = new ArrayList<>();
         if (config.huntTypes == null) config.huntTypes = new ArrayList<>();
+        if (config.macros == null) config.macros = new ArrayList<>();
+        for (int i = 0; i < config.macros.size(); i++) {
+            PatrolMacro m = config.macros.get(i);
+            if (m == null) {
+                m = new PatrolMacro();
+                config.macros.set(i, m);
+            }
+            if (m.name == null || m.name.trim().isEmpty()) m.name = "macro" + (i + 1);
+            m.trigger = m.trigger == null ? "death" : m.trigger.trim().toLowerCase(Locale.ROOT);
+            if (!m.trigger.equals("respawn") && !m.trigger.equals("screen")) m.trigger = "death";
+            m.when = m.when == null ? "always" : m.when.trim().toLowerCase(Locale.ROOT);
+            if (m.cooldownSeconds < 0) m.cooldownSeconds = 15;
+            if (m.steps == null) m.steps = new ArrayList<>();
+            for (PatrolMacro.Step s : m.steps) {
+                if (s == null) continue;
+                s.type = s.type == null ? "" : s.type.trim().toLowerCase(Locale.ROOT);
+                if (s.timeoutSeconds <= 0) s.timeoutSeconds = 120;
+                if (s.button == null) s.button = 0;
+            }
+        }
     }
 
     /** GUI 改完配置：校验数值，按需同步 Baritone 的挖/放开关，再写盘 */
@@ -170,6 +211,12 @@ public class PatrolManager {
     /** 聊天命令里请求打开配置界面，实际在 tick 里开(避免在聊天处理里直接切屏幕) */
     static void openConfig() {
         pendingOpenGui = true;
+    }
+
+    /** GUI 里的小改动（开关宏之类）：只校验+写盘，不碰运行时状态 */
+    static void saveQuiet() {
+        sanitizeConfig();
+        save();
     }
 
     private static long currentMtime() {
@@ -211,6 +258,7 @@ public class PatrolManager {
             case "hunt", "find", "target" -> cmdHunt(parts);
             case "back", "retreat", "return" -> cmdBack();
             case "gui", "config", "cfg" -> openConfig();
+            case "macro", "macros" -> cmdMacro(parts);
             case "scan", "entities", "near" -> cmdScan();
             case "reload" -> cmdReload();
             case "status" -> cmdStatus();
@@ -728,6 +776,7 @@ public class PatrolManager {
                 + " | 禁挖 " + (config.baritoneNoBreak ? "开" : "关")
                 + " | 被困自动退回 " + (config.retreatWhenTrapped ? "开" : "关")
                 + " | 目标死后 " + (config.cancelOnTargetDeath ? "取消寻路" : "走到倒地处")
+                + " | 宏 " + config.macros.size() + " 条"
                 + " | 目标须存活 " + config.huntMinAliveSeconds + "s");
     }
 
@@ -773,12 +822,378 @@ public class PatrolManager {
         send("§7  !patrol hunt stop     §f停止找怪");
         send("§7  !patrol back          §f被困住时按原路退回入口(再输一次停);找怪连续走不到会自动触发");
         send("§7  !patrol gui           §f打开配置界面，鼠标改参数(不用手编 JSON)");
+        send("§7  !patrol macro [...]   §f宏(死亡/复活/开界面 → 走位/点界面/发命令)；不带参数=列表");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
         send("§7  !patrol stop          §f停止巡逻/找怪/回退");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
         send("§7聊天栏输入 §f!pat§7 按 §fTab§7 可补全命令和点位名;参数在 config/patrol-points.json");
         send("§7掉线/服务器重启后重连，会自动接着巡逻或找怪(配置 §fautoResume§7 可关)");
         send("§7寻路时默认不让 Baritone 挖/放方块(副本里挖不动会卡死)；连续几个目标都走不到会停自动找怪(配置 §fbaritoneNoBreak§7 / §fhuntMaxGiveUps§7)");
+    }
+
+    // ---------- 宏（事件 -> 动作序列） ----------
+
+    private static void cmdMacro(String[] parts) {
+        String sub = parts.length > 2 ? parts[2].toLowerCase(Locale.ROOT) : "";
+        switch (sub) {
+            case "gui" -> MinecraftClient.getInstance()
+                    .setScreen(new PatrolMacroScreen(MinecraftClient.getInstance().currentScreen));
+            case "stop" -> {
+                if (runningMacro == null) {
+                    msg("当前没有宏在跑");
+                } else {
+                    finishMacro(MinecraftClient.getInstance(), "已手动中止");
+                }
+            }
+            case "on", "off", "toggle" -> {
+                if (parts.length < 4) {
+                    msg("用法: !patrol macro " + sub + " <宏名>");
+                    return;
+                }
+                PatrolMacro m = findMacro(parts[3]);
+                if (m == null) {
+                    msg("没有叫「" + parts[3] + "」的宏，!patrol macro 看列表");
+                    return;
+                }
+                m.enabled = sub.equals("on") || (sub.equals("toggle") && !m.enabled);
+                save();
+                msg("宏「" + m.name + "」= " + (m.enabled ? "开" : "关") + "（已保存）");
+            }
+            case "run", "test" -> {
+                if (parts.length < 4) {
+                    msg("用法: !patrol macro run <宏名>  — 立刻手动执行一次");
+                    return;
+                }
+                if (runningMacro != null) {
+                    msg("已有宏在跑: " + runningMacro.name + "（!patrol macro stop 停）");
+                    return;
+                }
+                PatrolMacro m = findMacro(parts[3]);
+                if (m == null) {
+                    msg("没有叫「" + parts[3] + "」的宏，!patrol macro 看列表");
+                    return;
+                }
+                if (m.steps.isEmpty()) {
+                    msg("宏「" + m.name + "」没有步骤（steps 是空的）");
+                    return;
+                }
+                startMacro(MinecraftClient.getInstance(), m);
+            }
+            default -> {
+                if (config.macros.isEmpty()) {
+                    msg("还没有宏。宏 = 事件(死亡/复活/开界面) + 一串动作，写在 config/patrol-points.json 的 macros 数组里；");
+                    msg("§7例: 死亡后走回副本入口 → {\"name\":\"回副本\",\"trigger\":\"death\",\"when\":\"hunt\",\"steps\":[{\"type\":\"wait\",\"seconds\":2},{\"type\":\"goto\",\"point\":\"入口\"}]}");
+                    return;
+                }
+                msg("共 " + config.macros.size() + " 条宏（!patrol macro on|off|run <宏名> | gui 打开开关界面 | 步骤改配置文件）:");
+                for (PatrolMacro m : config.macros) {
+                    String match = m.trigger.equals("screen") && m.screenMatch != null && !m.screenMatch.isEmpty()
+                            ? ":" + m.screenMatch : "";
+                    send((m.enabled ? "§a● " : "§7○ ") + "§f" + m.name
+                            + " §7[" + m.trigger + match + " | " + m.when + " | " + m.steps.size() + " 步 | 冷却 " + (int) m.cooldownSeconds + "s]");
+                }
+            }
+        }
+    }
+
+    private static PatrolMacro findMacro(String name) {
+        for (PatrolMacro m : config.macros) {
+            if (m != null && m.name.equalsIgnoreCase(name)) return m;
+        }
+        return null;
+    }
+
+    /** 宏名列表（Tab 补全用） */
+    static List<String> macroNames() {
+        List<String> out = new ArrayList<>();
+        for (PatrolMacro m : config.macros) {
+            if (m != null && m.name != null && !m.name.isEmpty()) out.add(m.name);
+        }
+        return out;
+    }
+
+    /** 手动跑一条宏（GUI 用）；返回是否真的启动了 */
+    static boolean runMacroByName(String name) {
+        if (runningMacro != null) return false;
+        PatrolMacro m = findMacro(name);
+        if (m == null || m.steps.isEmpty()) return false;
+        startMacro(MinecraftClient.getInstance(), m);
+        return true;
+    }
+
+    static boolean macroRunning() {
+        return runningMacro != null;
+    }
+
+    static PatrolMacro runningMacroInfo() {
+        return runningMacro;
+    }
+
+    static int macroProgressIndex() {
+        return macroStepIdx;
+    }
+
+    /** 事件检测：界面打开 / 死亡 / 复活 */
+    private static void tickMacroTriggers(MinecraftClient client) {
+        Screen cur = client.currentScreen;
+        if (cur != lastScreen) {
+            lastScreen = cur;
+            if (cur != null && !(cur instanceof ChatScreen)
+                    && !(cur instanceof PatrolConfigScreen) && !(cur instanceof PatrolMacroScreen)) {
+                fireMacros(client, "screen", cur);
+            }
+        }
+        if (client.player != null) {
+            boolean dead = client.player.isDead() || client.player.getHealth() <= 0;
+            if (dead && !wasDead) {
+                wasDead = true;
+                fireMacros(client, "death", null);
+            } else if (!dead && wasDead) {
+                wasDead = false;
+                fireMacros(client, "respawn", null);
+            }
+        }
+    }
+
+    private static void fireMacros(MinecraftClient client, String trigger, Screen screen) {
+        if (runningMacro != null || config.macros.isEmpty()) return;
+        String title = screen == null ? "" : screen.getTitle().getString();
+        boolean container = screen instanceof ScreenHandlerProvider<?>;
+        long now = System.currentTimeMillis();
+        for (PatrolMacro m : config.macros) {
+            if (m == null || !m.enabled) continue;
+            if (!trigger.equals(m.trigger)) continue;
+            if (!whenMatches(m.when)) continue;
+            if (trigger.equals("screen")) {
+                String match = m.screenMatch == null ? "" : m.screenMatch.trim();
+                if (match.equalsIgnoreCase("container")) {
+                    if (!container) continue;
+                } else if (!match.isEmpty() && !title.contains(match)) {
+                    continue;
+                }
+            }
+            Long last = macroLastRun.get(m.name);
+            if (last != null && now - last < (long) Math.max(1, m.cooldownSeconds) * 1000L) continue;
+            macroLastRun.put(m.name, now);
+            startMacro(client, m);
+            return; // 一次只跑一条，跑完再看别的
+        }
+    }
+
+    private static boolean whenMatches(String when) {
+        String w = when == null ? "always" : when.trim().toLowerCase(Locale.ROOT);
+        if (w.equals("hunt")) return huntMode != HuntMode.NONE;
+        if (w.equals("patrol")) return active;
+        return true;
+    }
+
+    private static void startMacro(MinecraftClient client, PatrolMacro m) {
+        suspendForMacro();
+        runningMacro = m;
+        macroStepIdx = 0;
+        macroWaitTicks = 0;
+        macroStepStarted = false;
+        macroGotoSent = false;
+        macroGotoTarget = null;
+        msg("§e执行宏「" + m.name + "」(" + m.steps.size() + " 步)  §7停止: !patrol macro stop");
+    }
+
+    /** 宏开始：挂起当前巡逻/找怪（跑完按 resumeAfter 接回来） */
+    private static void suspendForMacro() {
+        macroSuspendedPatrol = active;
+        macroSuspendedHunt = huntMode != HuntMode.NONE;
+        macroHuntType = sessionHuntType;
+        if (macroHuntType == null && huntMode == HuntMode.SINGLE) macroHuntType = huntLastType;
+        macroPointName = (active && !route.isEmpty() && routeIndex < route.size()) ? route.get(routeIndex).name : null;
+
+        clearPatrolState();
+        huntMode = HuntMode.NONE;
+        huntTarget = null;
+        huntLastGoto = null;
+        huntArrived = false;
+        huntStuckTicks = 0;
+        huntAttempts = 0;
+        huntGotoCooldown = 0;
+        huntGiveUpStreak = 0;
+        sessionHuntType = null;
+        retreating = false;
+        retreatTarget = null;
+        if (baritoneLoaded()) sendBaritone("cancel");
+    }
+
+    private static void tickMacro(MinecraftClient client) {
+        if (client.player == null || client.world == null) return;
+        PatrolMacro m = runningMacro;
+        if (m == null) return;
+        if (macroStepIdx >= m.steps.size()) {
+            finishMacro(client, "完成");
+            return;
+        }
+        PatrolMacro.Step s = m.steps.get(macroStepIdx);
+        String type = s.type == null ? "" : s.type;
+
+        if (!macroStepStarted) {
+            macroStepStarted = true;
+            switch (type) {
+                case "wait" -> {
+                    macroWaitTicks = (int) Math.max(0, Math.round(s.seconds * 20));
+                    return;
+                }
+                case "goto" -> {
+                    macroGotoSent = false;
+                    macroGotoTarget = null;
+                    macroWaitTicks = (int) Math.max(20, Math.round(s.timeoutSeconds * 20));
+                    return;
+                }
+                case "cmd" -> {
+                    sendRaw(s.text);
+                    nextMacroStep(client);
+                    return;
+                }
+                case "click" -> {
+                    doMacroClick(client, s);
+                    nextMacroStep(client);
+                    return;
+                }
+                case "respawn" -> {
+                    client.player.requestRespawn();
+                    nextMacroStep(client);
+                    return;
+                }
+                default -> {
+                    msg("§c宏: 不认识的步骤类型「" + type + "」，跳过");
+                    nextMacroStep(client);
+                    return;
+                }
+            }
+        }
+
+        switch (type) {
+            case "wait" -> {
+                if (macroWaitTicks > 0) {
+                    macroWaitTicks--;
+                    return;
+                }
+                nextMacroStep(client);
+            }
+            case "goto" -> tickMacroGoto(client, s);
+            default -> nextMacroStep(client);
+        }
+    }
+
+    private static void tickMacroGoto(MinecraftClient client, PatrolMacro.Step s) {
+        if (!client.player.isAlive()) return; // 死亡画面/复活中先等
+        if (!macroGotoSent) {
+            BlockPos target = resolveMacroGoto(client, s);
+            if (target == null) {
+                msg("§c宏: goto 找不到目标" + (s.point != null && !s.point.isEmpty()
+                        ? "（点位「" + s.point + "」不在当前世界）" : "（坐标 x/y/z 没写全）") + "，宏中止");
+                finishMacro(client, "中止");
+                return;
+            }
+            if (!baritoneLoaded()) {
+                msg("§c宏: 没有装 Baritone，goto 走不了，宏中止");
+                finishMacro(client, "中止");
+                return;
+            }
+            macroGotoTarget = target;
+            macroGotoSent = true;
+            sendBaritone("goto " + target.getX() + " " + target.getY() + " " + target.getZ());
+            return;
+        }
+        BlockPos t = macroGotoTarget;
+        if (t == null) {
+            nextMacroStep(client);
+            return;
+        }
+        double dx = client.player.getX() - (t.getX() + 0.5);
+        double dz = client.player.getZ() - (t.getZ() + 0.5);
+        double dy = client.player.getY() - t.getY();
+        if (Math.sqrt(dx * dx + dz * dz) <= config.arriveRadius && Math.abs(dy) <= ARRIVE_Y_TOLERANCE) {
+            nextMacroStep(client);
+            return;
+        }
+        if (--macroWaitTicks <= 0) {
+            msg("§e宏: goto 超时没走到 " + t.getX() + " " + t.getY() + " " + t.getZ() + "，宏中止");
+            finishMacro(client, "中止");
+        }
+    }
+
+    private static BlockPos resolveMacroGoto(MinecraftClient client, PatrolMacro.Step s) {
+        if (s.point != null && !s.point.trim().isEmpty()) {
+            String dim = currentDimension();
+            for (PatrolPoint p : config.points) {
+                if (p.dimension.equals(dim) && p.name.equalsIgnoreCase(s.point.trim())) {
+                    return new BlockPos(p.x, p.y, p.z);
+                }
+            }
+            return null;
+        }
+        if (s.x == null || s.y == null || s.z == null) return null;
+        return new BlockPos(s.x, s.y, s.z);
+    }
+
+    private static void doMacroClick(MinecraftClient client, PatrolMacro.Step s) {
+        int button = s.button == null ? 0 : s.button;
+        Screen screen = client.currentScreen;
+        if (s.slot != null) {
+            if (screen instanceof ScreenHandlerProvider<?> p && client.interactionManager != null && client.player != null) {
+                client.interactionManager.clickSlot(p.getScreenHandler().syncId, s.slot, button, SlotActionType.PICKUP, client.player);
+            } else {
+                msg("§c宏: click slot 需要先打开容器界面，这一步跳过");
+            }
+            return;
+        }
+        if (s.cx != null && s.cy != null) {
+            if (screen == null) {
+                msg("§c宏: click 需要界面开着，这一步跳过");
+                return;
+            }
+            Click click = new Click(s.cx, s.cy, new MouseInput(button, 0));
+            screen.mouseClicked(click, false);
+            screen.mouseReleased(click);
+            return;
+        }
+        msg("§c宏: click 没写 slot 或 cx/cy，这一步跳过");
+    }
+
+    private static void nextMacroStep(MinecraftClient client) {
+        macroStepIdx++;
+        macroStepStarted = false;
+        macroGotoSent = false;
+        macroGotoTarget = null;
+        if (runningMacro != null && macroStepIdx >= runningMacro.steps.size()) {
+            finishMacro(client, "完成");
+        }
+    }
+
+    private static void finishMacro(MinecraftClient client, String why) {
+        PatrolMacro m = runningMacro;
+        runningMacro = null;
+        macroStepStarted = false;
+        macroGotoSent = false;
+        macroGotoTarget = null;
+        if (baritoneLoaded()) sendBaritone("cancel");
+        if (m == null) return;
+        msg("宏「" + m.name + "」" + why);
+        if (m.resumeAfter && (macroSuspendedPatrol || macroSuspendedHunt)) {
+            resumeWasPatrol = macroSuspendedPatrol;
+            resumeWasHunt = macroSuspendedHunt;
+            resumeHuntType = macroHuntType;
+            resumePointName = macroPointName;
+            applyResume(client, "宏结束");
+        }
+        macroSuspendedPatrol = false;
+        macroSuspendedHunt = false;
+        macroHuntType = null;
+        macroPointName = null;
+    }
+
+    /** 宏里 cmd 动作：原样发送（服务器命令/聊天；# 开头会被 Baritone 拦下） */
+    private static void sendRaw(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        if (mc.player == null || mc.player.networkHandler == null) return;
+        mc.player.networkHandler.sendChatMessage(text.trim());
     }
 
     // ---------- 主循环 ----------
@@ -790,6 +1205,13 @@ public class PatrolManager {
         if (pendingOpenGui) {
             pendingOpenGui = false;
             client.setScreen(new PatrolConfigScreen(client.currentScreen));
+            return;
+        }
+
+        // 宏：先检查事件(死亡/复活/开界面)，有宏在跑就整个接管(巡逻/找怪已被挂起)
+        tickMacroTriggers(client);
+        if (runningMacro != null) {
+            tickMacro(client);
             return;
         }
 
@@ -812,7 +1234,7 @@ public class PatrolManager {
                 return;
             }
             resumePending = false;
-            applyResume(client);
+            applyResume(client, "已重连");
             return;
         }
 
@@ -1118,6 +1540,7 @@ public class PatrolManager {
         stuckTicks = 0;
         pointTicks = 0;
         scanCounter = 0;
+        wasDead = false;
     }
 
     /** 刚进世界，给区块/实体一点加载时间 */
@@ -1125,13 +1548,13 @@ public class PatrolManager {
         if (resumePending) resumeDelayTicks = 40;
     }
 
-    private static void applyResume(MinecraftClient client) {
+    private static void applyResume(MinecraftClient client, String reason) {
         if (resumeWasPatrol) {
             String dim = currentDimension();
             List<PatrolPoint> list = pointsIn(dim);
             if (list.isEmpty()) {
                 stop();
-                msg("已重连，但 " + shortDim(dim) + " 没有点位，巡逻不恢复");
+                msg(reason + "，但 " + shortDim(dim) + " 没有点位，巡逻不恢复");
             } else {
                 int idx = 0;
                 if (resumePointName != null) {
@@ -1151,7 +1574,7 @@ public class PatrolManager {
                 pointTicks = 0;
                 active = true;
                 applyNoBreak();
-                msg("已重连，继续巡逻 " + (idx + 1) + "/" + list.size() + " → " + list.get(idx).name);
+                msg(reason + "，继续巡逻 " + (idx + 1) + "/" + list.size() + " → " + list.get(idx).name);
                 gotoCurrent();
             }
         } else if (resumeWasHunt) {
@@ -1164,7 +1587,7 @@ public class PatrolManager {
             huntArrived = false;
             huntGiveUpStreak = 0;
             resetHuntTracking(client);
-            msg("已重连，继续找怪" + (sessionHuntType != null
+            msg(reason + "，继续找怪" + (sessionHuntType != null
                     ? "（本次只找 " + sessionHuntType + "）" : "（" + targetSummary() + "）")
                     + "；目标已随断线丢失，改成自动继续找");
         }
@@ -1333,6 +1756,11 @@ public class PatrolManager {
         public boolean retreating;
         public int retreatLeft;
         public int retreatDistance;
+
+        public boolean macro;
+        public String macroName = "";
+        public int macroStep;
+        public int macroTotal;
     }
 
     public enum HudStatus {
@@ -1358,6 +1786,16 @@ public class PatrolManager {
     public static HudState hudState() {
         if (!config.hud) return null;
         if (mc.player == null || mc.world == null) return null;
+
+        if (runningMacro != null) {
+            HudState s = new HudState();
+            s.macro = true;
+            s.macroName = runningMacro.name;
+            s.macroTotal = runningMacro.steps.size();
+            s.macroStep = Math.min(macroStepIdx + 1, s.macroTotal);
+            if (lastEventTicks > 0) s.event = lastEvent;
+            return s;
+        }
 
         if (retreating) {
             HudState s = new HudState();

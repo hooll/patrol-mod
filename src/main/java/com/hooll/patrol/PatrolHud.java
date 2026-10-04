@@ -32,7 +32,14 @@ public class PatrolHud implements HudElement {
         MutableText line2;
         boolean showBar;
 
-        if (st.retreating) {
+        if (st.macro) {
+            line1 = Text.literal("宏 ").formatted(Formatting.WHITE)
+                    .append(Text.literal(st.macroName).formatted(Formatting.YELLOW));
+            line2 = Text.literal("步骤 " + st.macroStep + "/" + st.macroTotal).formatted(Formatting.AQUA)
+                    .append(Text.literal("  |  ").formatted(Formatting.DARK_GRAY))
+                    .append(Text.literal("!patrol macro stop 停").formatted(Formatting.DARK_GRAY));
+            showBar = false;
+        } else if (st.retreating) {
             line1 = Text.literal("回退中").formatted(Formatting.WHITE)
                     .append(Text.literal(" · 按原路退回入口").formatted(Formatting.GRAY));
             line2 = Text.literal("剩余 " + st.retreatLeft + " 步").formatted(Formatting.YELLOW)

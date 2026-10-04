@@ -65,5 +65,8 @@ public class PatrolConfig {
     // 关掉则保持原样：继续往它倒下的位置走
     public boolean cancelOnTargetDeath = true;
 
+    // 宏：事件 -> 一串动作。事件 death/respawn/screen，动作 wait/goto/cmd/click/respawn
+    public List<PatrolMacro> macros = new ArrayList<>();
+
     public List<PatrolPoint> points = new ArrayList<>();
 }
