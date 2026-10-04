@@ -48,6 +48,7 @@ public final class PatrolSuggestions {
                 .then(LiteralArgumentBuilder.<CommandSource>literal("macro")
                         .then(LiteralArgumentBuilder.<CommandSource>literal("gui"))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("stop"))
+                        .then(LiteralArgumentBuilder.<CommandSource>literal("new"))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("on").then(macroNameArg()))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("off").then(macroNameArg()))
                         .then(LiteralArgumentBuilder.<CommandSource>literal("toggle").then(macroNameArg()))

@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -38,6 +39,10 @@ public class PatrolManager {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path CONFIG_PATH = FabricLoader.getInstance().getConfigDir().resolve("patrol-points.json");
+    /** 一个宏一个文件：config/patrol-macro/*.json */
+    private static final Path MACRO_DIR = FabricLoader.getInstance().getConfigDir().resolve("patrol-macro");
+    /** 运行时合并后的宏列表（文件夹里的 + patrol-points.json 里旧的 macros，同名时以文件为准） */
+    private static List<PatrolMacro> macros = new ArrayList<>();
 
     private static final int MOB_SCAN_INTERVAL = 5;
     private static final double ARRIVE_Y_TOLERANCE = 4;
@@ -135,17 +140,60 @@ public class PatrolManager {
     // ---------- 配置读写 ----------
 
     public static void load() {
-        if (!Files.exists(CONFIG_PATH)) return;
-        try (Reader reader = Files.newBufferedReader(CONFIG_PATH, StandardCharsets.UTF_8)) {
-            PatrolConfig loaded = GSON.fromJson(reader, PatrolConfig.class);
-            if (loaded != null) {
-                config = loaded;
-                sanitizeConfig();
+        if (Files.exists(CONFIG_PATH)) {
+            try (Reader reader = Files.newBufferedReader(CONFIG_PATH, StandardCharsets.UTF_8)) {
+                PatrolConfig loaded = GSON.fromJson(reader, PatrolConfig.class);
+                if (loaded != null) {
+                    config = loaded;
+                    sanitizeConfig();
+                }
+            } catch (IOException | RuntimeException e) {
+                PatrolMod.LOG.error("failed to load patrol config", e);
             }
-        } catch (IOException | RuntimeException e) {
-            PatrolMod.LOG.error("failed to load patrol config", e);
         }
+        loadMacroFiles();
         lastConfigMtime = currentMtime();
+    }
+
+    /** 读 config/patrol-macro/ 下的每个 .json（一个文件一条宏），再并上 patrol-points.json 里旧的 macros */
+    private static void loadMacroFiles() {
+        List<PatrolMacro> out = new ArrayList<>();
+        if (Files.isDirectory(MACRO_DIR)) {
+            List<Path> files = new ArrayList<>();
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(MACRO_DIR, "*.json")) {
+                for (Path p : ds) files.add(p);
+            } catch (IOException e) {
+                PatrolMod.LOG.error("failed to list macro dir", e);
+            }
+            files.sort((a, b) -> a.getFileName().toString().compareToIgnoreCase(b.getFileName().toString()));
+            for (Path p : files) {
+                try (Reader reader = Files.newBufferedReader(p, StandardCharsets.UTF_8)) {
+                    PatrolMacro m = GSON.fromJson(reader, PatrolMacro.class);
+                    if (m == null) continue;
+                    m.file = p.getFileName().toString();
+                    if (m.name == null || m.name.trim().isEmpty()) {
+                        String fn = m.file;
+                        m.name = fn.toLowerCase(Locale.ROOT).endsWith(".json") ? fn.substring(0, fn.length() - 5) : fn;
+                    }
+                    sanitizeMacro(m, out.size());
+                    out.add(m);
+                } catch (IOException | RuntimeException e) {
+                    PatrolMod.LOG.error("failed to load macro file " + p, e);
+                }
+            }
+        }
+        for (PatrolMacro m : config.macros) {
+            if (m == null) continue;
+            boolean dup = false;
+            for (PatrolMacro f : out) {
+                if (f.name.equalsIgnoreCase(m.name)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) out.add(m);
+        }
+        macros = out;
     }
 
     /** 数值兜底：文件/GUI 填了离谱的值时拉回可用范围 */
@@ -180,18 +228,22 @@ public class PatrolManager {
                 m = new PatrolMacro();
                 config.macros.set(i, m);
             }
-            if (m.name == null || m.name.trim().isEmpty()) m.name = "macro" + (i + 1);
-            m.trigger = m.trigger == null ? "death" : m.trigger.trim().toLowerCase(Locale.ROOT);
-            if (!m.trigger.equals("respawn") && !m.trigger.equals("screen")) m.trigger = "death";
-            m.when = m.when == null ? "always" : m.when.trim().toLowerCase(Locale.ROOT);
-            if (m.cooldownSeconds < 0) m.cooldownSeconds = 15;
-            if (m.steps == null) m.steps = new ArrayList<>();
-            for (PatrolMacro.Step s : m.steps) {
-                if (s == null) continue;
-                s.type = s.type == null ? "" : s.type.trim().toLowerCase(Locale.ROOT);
-                if (s.timeoutSeconds <= 0) s.timeoutSeconds = 120;
-                if (s.button == null) s.button = 0;
-            }
+            sanitizeMacro(m, i);
+        }
+    }
+
+    private static void sanitizeMacro(PatrolMacro m, int idx) {
+        if (m.name == null || m.name.trim().isEmpty()) m.name = "macro" + (idx + 1);
+        m.trigger = m.trigger == null ? "death" : m.trigger.trim().toLowerCase(Locale.ROOT);
+        if (!m.trigger.equals("respawn") && !m.trigger.equals("screen")) m.trigger = "death";
+        m.when = m.when == null ? "always" : m.when.trim().toLowerCase(Locale.ROOT);
+        if (m.cooldownSeconds < 0) m.cooldownSeconds = 15;
+        if (m.steps == null) m.steps = new ArrayList<>();
+        for (PatrolMacro.Step s : m.steps) {
+            if (s == null) continue;
+            s.type = s.type == null ? "" : s.type.trim().toLowerCase(Locale.ROOT);
+            if (s.timeoutSeconds <= 0) s.timeoutSeconds = 120;
+            if (s.button == null) s.button = 0;
         }
     }
 
@@ -213,18 +265,29 @@ public class PatrolManager {
         pendingOpenGui = true;
     }
 
-    /** GUI 里的小改动（开关宏之类）：只校验+写盘，不碰运行时状态 */
-    static void saveQuiet() {
-        sanitizeConfig();
-        save();
-    }
-
+    /** 配置文件 + 宏文件夹里最新的修改时间（改了哪个都会触发重载） */
     private static long currentMtime() {
+        long max = -1;
         try {
-            return Files.exists(CONFIG_PATH) ? Files.getLastModifiedTime(CONFIG_PATH).toMillis() : -1;
-        } catch (IOException e) {
-            return -1;
+            if (Files.exists(CONFIG_PATH)) max = Files.getLastModifiedTime(CONFIG_PATH).toMillis();
+        } catch (IOException ignored) {
         }
+        if (Files.isDirectory(MACRO_DIR)) {
+            try {
+                max = Math.max(max, Files.getLastModifiedTime(MACRO_DIR).toMillis());
+            } catch (IOException ignored) {
+            }
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(MACRO_DIR, "*.json")) {
+                for (Path p : ds) {
+                    try {
+                        max = Math.max(max, Files.getLastModifiedTime(p).toMillis());
+                    } catch (IOException ignored) {
+                    }
+                }
+            } catch (IOException ignored) {
+            }
+        }
+        return max;
     }
 
     private static void save() {
@@ -822,7 +885,7 @@ public class PatrolManager {
         send("§7  !patrol hunt stop     §f停止找怪");
         send("§7  !patrol back          §f被困住时按原路退回入口(再输一次停);找怪连续走不到会自动触发");
         send("§7  !patrol gui           §f打开配置界面，鼠标改参数(不用手编 JSON)");
-        send("§7  !patrol macro [...]   §f宏(死亡/复活/开界面 → 走位/点界面/发命令)；不带参数=列表");
+        send("§7  !patrol macro [...]   §f宏：不带参数=列表；on/off/run <名字>；new 或 gui 进去新建编辑");
         send("§7  !patrol scan          §f列出附近活物的实体类型,排查自定义怪");
         send("§7  !patrol stop          §f停止巡逻/找怪/回退");
         send("§7  !patrol reload        §f重新读取配置文件(改文件后 1 秒内也会自动重载)");
@@ -838,6 +901,11 @@ public class PatrolManager {
         switch (sub) {
             case "gui" -> MinecraftClient.getInstance()
                     .setScreen(new PatrolMacroScreen(MinecraftClient.getInstance().currentScreen));
+            case "new" -> {
+                String name = parts.length > 3 ? parts[3] : "新宏";
+                MinecraftClient client = MinecraftClient.getInstance();
+                client.setScreen(new PatrolMacroEditScreen(client.currentScreen, newTemplateMacro(name)));
+            }
             case "stop" -> {
                 if (runningMacro == null) {
                     msg("当前没有宏在跑");
@@ -856,7 +924,7 @@ public class PatrolManager {
                     return;
                 }
                 m.enabled = sub.equals("on") || (sub.equals("toggle") && !m.enabled);
-                save();
+                saveMacro(m);
                 msg("宏「" + m.name + "」= " + (m.enabled ? "开" : "关") + "（已保存）");
             }
             case "run", "test" -> {
@@ -880,24 +948,25 @@ public class PatrolManager {
                 startMacro(MinecraftClient.getInstance(), m);
             }
             default -> {
-                if (config.macros.isEmpty()) {
-                    msg("还没有宏。宏 = 事件(死亡/复活/开界面) + 一串动作，写在 config/patrol-points.json 的 macros 数组里；");
-                    msg("§7例: 死亡后走回副本入口 → {\"name\":\"回副本\",\"trigger\":\"death\",\"when\":\"hunt\",\"steps\":[{\"type\":\"wait\",\"seconds\":2},{\"type\":\"goto\",\"point\":\"入口\"}]}");
+                if (macros.isEmpty()) {
+                    msg("还没有宏。宏 = 事件(死亡/复活/开界面) + 一串动作；");
+                    msg("§7一条宏一个文件，放在 config/patrol-macro/ 里；也可以 !patrol macro gui 里面点「新建宏」");
                     return;
                 }
-                msg("共 " + config.macros.size() + " 条宏（!patrol macro on|off|run <宏名> | gui 打开开关界面 | 步骤改配置文件）:");
-                for (PatrolMacro m : config.macros) {
+                msg("共 " + macros.size() + " 条宏（!patrol macro on|off|run <宏名> | gui 里可以新建/编辑/开关）:");
+                for (PatrolMacro m : macros) {
                     String match = m.trigger.equals("screen") && m.screenMatch != null && !m.screenMatch.isEmpty()
                             ? ":" + m.screenMatch : "";
                     send((m.enabled ? "§a● " : "§7○ ") + "§f" + m.name
-                            + " §7[" + m.trigger + match + " | " + m.when + " | " + m.steps.size() + " 步 | 冷却 " + (int) m.cooldownSeconds + "s]");
+                            + " §7[" + m.trigger + match + " | " + m.when + " | " + m.steps.size() + " 步 | 冷却 " + (int) m.cooldownSeconds + "s]"
+                            + (m.file != null ? " §8" + m.file : ""));
                 }
             }
         }
     }
 
     private static PatrolMacro findMacro(String name) {
-        for (PatrolMacro m : config.macros) {
+        for (PatrolMacro m : macros) {
             if (m != null && m.name.equalsIgnoreCase(name)) return m;
         }
         return null;
@@ -906,10 +975,114 @@ public class PatrolManager {
     /** 宏名列表（Tab 补全用） */
     static List<String> macroNames() {
         List<String> out = new ArrayList<>();
-        for (PatrolMacro m : config.macros) {
+        for (PatrolMacro m : macros) {
             if (m != null && m.name != null && !m.name.isEmpty()) out.add(m.name);
         }
         return out;
+    }
+
+    // ---------- 宏的增删改（命令 / GUI 共用） ----------
+
+    static List<PatrolMacro> macroList() {
+        return macros;
+    }
+
+    static PatrolMacro copyMacro(PatrolMacro src) {
+        PatrolMacro copy = src == null ? null : GSON.fromJson(GSON.toJson(src), PatrolMacro.class);
+        if (copy == null) copy = new PatrolMacro();
+        copy.file = src == null ? null : src.file;
+        return copy;
+    }
+
+    /** 新建一条模板宏（先不写盘，编辑器点保存才写） */
+    static PatrolMacro newTemplateMacro(String name) {
+        PatrolMacro m = new PatrolMacro();
+        m.name = name == null || name.trim().isEmpty() ? "新宏" : name.trim();
+        m.enabled = false;
+        m.trigger = "death";
+        m.when = "hunt";
+        m.cooldownSeconds = 30;
+        m.resumeAfter = true;
+        PatrolMacro.Step wait = new PatrolMacro.Step();
+        wait.type = "wait";
+        wait.seconds = 3;
+        PatrolMacro.Step respawn = new PatrolMacro.Step();
+        respawn.type = "respawn";
+        PatrolMacro.Step go = new PatrolMacro.Step();
+        go.type = "goto";
+        go.point = "入口";
+        m.steps.add(wait);
+        m.steps.add(respawn);
+        m.steps.add(go);
+        return m;
+    }
+
+    private static String macroFileName(String name) {
+        String base = name == null ? "macro" : name.trim();
+        if (base.toLowerCase(Locale.ROOT).endsWith(".json")) base = base.substring(0, base.length() - 5);
+        base = base.replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
+        if (base.isEmpty()) base = "macro";
+        return base + ".json";
+    }
+
+    /** 这条宏保存时会用到的文件名（编辑器提示用） */
+    static String suggestedFile(PatrolMacro m) {
+        if (m == null) return "macro.json";
+        return m.file != null ? m.file : macroFileName(m.name);
+    }
+
+    /** 保存一条宏：有对应文件的写文件；旧格式(在 patrol-points.json 里)的整份保存 */
+    static void saveMacro(PatrolMacro m) {
+        if (m == null) return;
+        sanitizeMacro(m, 0);
+        if (m.file == null) {
+            save();
+            return;
+        }
+        try {
+            Files.createDirectories(MACRO_DIR);
+            try (Writer writer = Files.newBufferedWriter(MACRO_DIR.resolve(m.file), StandardCharsets.UTF_8)) {
+                GSON.toJson(m, writer);
+            }
+        } catch (IOException e) {
+            PatrolMod.LOG.error("failed to save macro file", e);
+        }
+        lastConfigMtime = currentMtime();
+    }
+
+    /** 编辑器保存：没有文件名的按名字生成一个，写盘并替换运行时列表 */
+    static void saveEditedMacro(PatrolMacro m) {
+        if (m == null) return;
+        if (m.file == null) m.file = macroFileName(m.name);
+        saveMacro(m);
+        boolean found = false;
+        for (int i = 0; i < macros.size(); i++) {
+            PatrolMacro cur = macros.get(i);
+            if (cur == m || (cur.file != null && cur.file.equals(m.file))) {
+                macros.set(i, m);
+                found = true;
+                break;
+            }
+        }
+        if (!found) macros.add(m);
+        // 旧格式(内联在 patrol-points.json)里同名的搬走了，别留重复
+        if (config.macros.removeIf(x -> x != null && x != m && x.name.equalsIgnoreCase(m.name))) {
+            save();
+        }
+    }
+
+    /** 删除一条宏：删文件并从运行时列表移除 */
+    static void deleteMacro(PatrolMacro m) {
+        if (m == null) return;
+        macros.remove(m);
+        if (m.file != null) {
+            try {
+                Files.deleteIfExists(MACRO_DIR.resolve(m.file));
+            } catch (IOException e) {
+                PatrolMod.LOG.error("failed to delete macro file", e);
+            }
+        }
+        lastConfigMtime = currentMtime();
     }
 
     /** 手动跑一条宏（GUI 用）；返回是否真的启动了 */
@@ -956,11 +1129,11 @@ public class PatrolManager {
     }
 
     private static void fireMacros(MinecraftClient client, String trigger, Screen screen) {
-        if (runningMacro != null || config.macros.isEmpty()) return;
+        if (runningMacro != null || macros.isEmpty()) return;
         String title = screen == null ? "" : screen.getTitle().getString();
         boolean container = screen instanceof ScreenHandlerProvider<?>;
         long now = System.currentTimeMillis();
-        for (PatrolMacro m : config.macros) {
+        for (PatrolMacro m : macros) {
             if (m == null || !m.enabled) continue;
             if (!trigger.equals(m.trigger)) continue;
             if (!whenMatches(m.when)) continue;

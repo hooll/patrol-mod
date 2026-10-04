@@ -22,6 +22,9 @@ public class PatrolMacro {
     public boolean resumeAfter = true;
     public List<Step> steps = new ArrayList<>();
 
+    /** config/patrol-macro/ 里的文件名（运行时用，不写进 JSON）；null = 还写在 patrol-points.json 里 */
+    public transient String file = null;
+
     public static class Step {
         /** wait / goto / cmd / click / respawn */
         public String type = "";
@@ -42,5 +45,7 @@ public class PatrolMacro {
         public Integer button;
         /** goto 走到位的超时(秒) */
         public double timeoutSeconds = 120;
+        /** 编辑器里那格文本的原始内容（运行时用，不写进 JSON） */
+        public transient String raw = null;
     }
 }

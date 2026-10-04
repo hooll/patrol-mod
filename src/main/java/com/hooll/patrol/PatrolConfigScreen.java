@@ -93,9 +93,9 @@ public class PatrolConfigScreen extends Screen {
                 .dimensions(this.width / 2 - 105, by, 100, 20).build());
         addDrawableChild(ButtonWidget.builder(Text.literal("取消"), b -> close())
                 .dimensions(this.width / 2 + 5, by, 100, 20).build());
-        if (!PatrolManager.config.macros.isEmpty()) {
+        if (!PatrolManager.macroList().isEmpty()) {
             addDrawableChild(ButtonWidget.builder(
-                    Text.literal("宏开关(" + PatrolManager.config.macros.size() + ")"),
+                    Text.literal("宏(" + PatrolManager.macroList().size() + ")"),
                     b -> MinecraftClient.getInstance().setScreen(new PatrolMacroScreen(this)))
                     .dimensions(this.width / 2 - 211, by, 100, 20).build());
         }
