@@ -34,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Supplier;
 
 public class PatrolManager {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
@@ -49,7 +50,8 @@ public class PatrolManager {
     private static final int EVENT_SHOW_TICKS = 80;
 
     static PatrolConfig config = new PatrolConfig();
-    private static boolean pendingOpenGui = false;
+    /** 待打开的界面（聊天命令里不能直接 setScreen：聊天界面发送后还会把屏幕置回 null，会把新界面顶掉） */
+    private static Supplier<Screen> pendingScreen = null;
 
     // ---------- 巡逻状态 ----------
     private static boolean active = false;
@@ -262,7 +264,7 @@ public class PatrolManager {
 
     /** 聊天命令里请求打开配置界面，实际在 tick 里开(避免在聊天处理里直接切屏幕) */
     static void openConfig() {
-        pendingOpenGui = true;
+        pendingScreen = () -> new PatrolConfigScreen(MinecraftClient.getInstance().currentScreen);
     }
 
     /** 配置文件 + 宏文件夹里最新的修改时间（改了哪个都会触发重载） */
@@ -899,12 +901,10 @@ public class PatrolManager {
     private static void cmdMacro(String[] parts) {
         String sub = parts.length > 2 ? parts[2].toLowerCase(Locale.ROOT) : "";
         switch (sub) {
-            case "gui" -> MinecraftClient.getInstance()
-                    .setScreen(new PatrolMacroScreen(MinecraftClient.getInstance().currentScreen));
+            case "gui" -> pendingScreen = () -> new PatrolMacroScreen(MinecraftClient.getInstance().currentScreen);
             case "new" -> {
                 String name = parts.length > 3 ? parts[3] : "新宏";
-                MinecraftClient client = MinecraftClient.getInstance();
-                client.setScreen(new PatrolMacroEditScreen(client.currentScreen, newTemplateMacro(name)));
+                pendingScreen = () -> new PatrolMacroEditScreen(MinecraftClient.getInstance().currentScreen, newTemplateMacro(name));
             }
             case "stop" -> {
                 if (runningMacro == null) {
@@ -1374,10 +1374,11 @@ public class PatrolManager {
     public static void tick(MinecraftClient client) {
         if (lastEventTicks > 0) lastEventTicks--;
 
-        // !patrol gui：等 tick 里再开界面
-        if (pendingOpenGui) {
-            pendingOpenGui = false;
-            client.setScreen(new PatrolConfigScreen(client.currentScreen));
+        // !patrol gui / macro gui：等 tick 里再开界面
+        if (pendingScreen != null) {
+            Supplier<Screen> s = pendingScreen;
+            pendingScreen = null;
+            client.setScreen(s.get());
             return;
         }
 

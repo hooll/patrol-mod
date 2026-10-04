@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "patrol-mod",
-  "version": "1.17.0",
+  "version": "1.17.1",
   "name": "Patrol Mod",
   "description": "多世界循环巡逻 + 自动找怪：!patrol add/start/hunt，由 Baritone 自动寻路，到位切换、卡住重试；怪的目标类型可配(含自定义模型怪)；!patrol gui 可视化改配置；宏(事件→动作，一条宏一个文件，游戏内可编辑)。",
   "authors": [

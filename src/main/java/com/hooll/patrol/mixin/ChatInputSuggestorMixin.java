@@ -26,6 +26,10 @@ public abstract class ChatInputSuggestorMixin {
     @Shadow
     private CompletableFuture<Suggestions> pendingSuggestions;
 
+    /** 原生 refresh() 会填这个字段，showCommandSuggestions() 渲染/建窗时要读它；我们取消了原生逻辑，必须自己填 */
+    @Shadow
+    private ParseResults<CommandSource> parse;
+
     @Shadow
     private ChatInputSuggestor.SuggestionWindow window;
 
@@ -45,10 +49,11 @@ public abstract class ChatInputSuggestorMixin {
         StringReader reader = new StringReader(text);
         reader.setCursor(1);
 
-        ParseResults<CommandSource> parse = PatrolSuggestions.DISPATCHER.parse(reader, mc.player.networkHandler.getCommandSource());
+        ParseResults<CommandSource> parsed = PatrolSuggestions.DISPATCHER.parse(reader, mc.player.networkHandler.getCommandSource());
+        this.parse = parsed;
 
         if (this.window == null || !this.completingSuggestions) {
-            this.pendingSuggestions = PatrolSuggestions.DISPATCHER.getCompletionSuggestions(parse, cursor);
+            this.pendingSuggestions = PatrolSuggestions.DISPATCHER.getCompletionSuggestions(parsed, cursor);
             CompletableFuture<Suggestions> pending = this.pendingSuggestions;
             pending.thenRun(() -> {
                 if (pending.isDone()) {
